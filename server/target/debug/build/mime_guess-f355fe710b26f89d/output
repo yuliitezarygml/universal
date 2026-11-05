@@ -1,0 +1,1 @@
+cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/Users/iulian/Documents/universal/server/target/debug/build/mime_guess-f355fe710b26f89d/out/mime_types_generated.rs

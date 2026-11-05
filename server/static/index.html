@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ArtCraft Server & Distribution Hub</title>
+  <link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+
+  <!-- Auth Modal -->
+  <div id="authModal" class="modal-backdrop" style="display: none;">
+    <div class="modal-box">
+      <h3>Админ-панель ArtCraft</h3>
+      <p>Введите пароль администратора для управления сервером</p>
+      <div class="form-group">
+        <input type="password" id="adminPasswordInput" class="input-text" style="width: 100%;" placeholder="Пароль администратора (по умолчанию: admin123)">
+      </div>
+      <button class="btn" style="width: 100%; justify-content: center;" onclick="submitLogin()">Войти</button>
+      <div id="loginError" style="color: var(--danger); font-size: 12px; margin-top: 10px; display: none;">Неверный пароль</div>
+    </div>
+  </div>
+
+  <header>
+    <div class="logo-group">
+      <div class="logo-badge">ARTCRAFT</div>
+      <div>
+        <div class="server-title">Distribution & Mirror Server</div>
+        <div class="server-subtitle" id="serverSubtitle">Загрузка информации...</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div class="status-pill">
+        <span class="status-dot"></span>
+        <span>Online</span>
+      </div>
+      <button class="btn btn-secondary" onclick="logout()" style="padding: 6px 12px; font-size: 12px;">Выйти</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Stats Row -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Файлов в хранилище</div>
+        <div class="stat-val" id="statFiles">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Занято диска</div>
+        <div class="stat-val" id="statSize">0 MB</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Активных закачек</div>
+        <div class="stat-val" id="statTasks" style="color: var(--accent);">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Порт сервера</div>
+        <div class="stat-val" id="statPort">8080</div>
+      </div>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('suite', event)">📦 Каталог приложений (Sync Suite)</button>
+      <button class="tab-btn" onclick="switchTab('storage', event)">📁 Хранилище и Загрузка</button>
+      <button class="tab-btn" onclick="switchTab('remote', event)">⬇️ Скачать по ссылке (URL)</button>
+      <button class="tab-btn" onclick="switchTab('feed', event)">📡 API для Лаунчера</button>
+    </div>
+
+    <!-- TAB 0: Suite Sync -->
+    <div id="tabSuite">
+      <div class="card" style="margin-bottom: 20px;">
+        <div class="card-header" style="flex-wrap: wrap; gap: 12px;">
+          <div>
+            <div class="card-title">Синхронизация Craft App Suite с GitHub</div>
+            <div style="color: var(--text-muted); font-size: 12px; margin-top: 4px;">
+              Сервер автоматически сверяет контрольные суммы SHA-256. Скачанные пакеты отдаются лаунчеру на максимальной локальной скорости.
+            </div>
+          </div>
+          <div style="display: flex; gap: 10px;">
+            <button class="btn" onclick="syncAllApps()">🚀 Синхронизировать ВСЕ 17 приложений</button>
+            <button class="btn btn-secondary" onclick="loadApps()">🔄 Обновить статус</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="appsGrid" class="apps-grid">
+        <div style="text-align: center; color: var(--text-muted); padding: 40px; grid-column: 1 / -1;">
+          Опрос фида релизов и проверка локального хранилища...
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 1: Storage & Upload -->
+    <div id="tabStorage" style="display: none;">
+      <!-- Upload Card -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Загрузить инсталлятор на сервер вручную</div>
+        </div>
+        <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+          <div class="drop-zone-icon">📤</div>
+          <div style="font-weight: 600; margin-bottom: 4px;">Нажмите или перетащите файл сюда</div>
+          <div style="color: var(--text-muted); font-size: 12px;">Поддерживаются .dmg, .msi, .deb, .rpm, .flatpak, .AppImage, .zip, .exe</div>
+          <input type="file" id="fileInput" style="display: none;" onchange="handleFileUpload(this.files)">
+          <div id="uploadProgressBox" style="margin-top: 16px; display: none;">
+            <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
+              <span id="uploadFileName">Файл</span>
+              <span id="uploadPercent">0%</span>
+            </div>
+            <div class="progress-bar-wrap">
+              <div id="uploadProgressBar" class="progress-bar"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Files List -->
+      <div class="card">
+        <div class="card-header" style="flex-wrap: wrap; gap: 10px;">
+          <div class="card-title">Сохраненные пакеты в хранилище</div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <label style="font-size: 12px; color: var(--text-muted);">Папка:</label>
+            <select id="folderFilter" class="input-text" style="width: auto; padding: 6px 12px; font-size: 12px;" onchange="renderFilteredFiles()">
+              <option value="all">Все папки</option>
+            </select>
+            <button class="btn btn-secondary" onclick="loadFiles()">🔄 Обновить</button>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Имя файла</th>
+                <th>Папка / Категория</th>
+                <th>Размер</th>
+                <th>SHA-256 Checksum</th>
+                <th>Дата</th>
+                <th>Действия</th>
+              </tr>
+            </thead>
+            <tbody id="filesTableBody">
+              <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Загрузка файлов...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: Remote Download -->
+    <div id="tabRemote" style="display: none;">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Дать команду серверу скачать любой файл по URL</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Прямой URL файла (GitHub Release или любой HTTPS адрес):</label>
+          <div class="input-row">
+            <input type="url" id="remoteUrl" class="input-text" placeholder="https://github.com/storytold/photocraft/releases/download/v0.5.0/photocraft-0.5.0.dmg">
+            <button class="btn" onclick="startRemoteDownload()">Скачать на сервер</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tasks list -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Текущие и недавние фоновые загрузки</div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Имя файла</th>
+                <th>Статус</th>
+                <th>Прогресс</th>
+                <th>Время запуска</th>
+              </tr>
+            </thead>
+            <tbody id="tasksTableBody">
+              <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Нет активных задач</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: Feed API -->
+    <div id="tabFeed" style="display: none;">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Подключение ArtCraft Launcher к этому серверу</div>
+        </div>
+        <p style="margin-bottom: 12px; color: var(--text-muted);">
+          Чтобы ArtCraft Launcher брал релизы и файлы с вашего сервера, задайте URL фида:
+        </p>
+        <div class="form-group">
+          <label class="form-label">URL фида релизов для клиента:</label>
+          <div class="input-row">
+            <input type="text" id="feedUrlDisplay" class="input-text" readonly style="font-family: var(--font-mono); font-size: 13px;">
+            <button class="btn btn-secondary" onclick="copyFeedUrl()">📋 Копировать</button>
+          </div>
+        </div>
+        <div style="margin-top: 16px;">
+          <div class="card-title" style="font-size: 14px; margin-bottom: 8px;">Текущий ответ JSON фида:</div>
+          <pre id="feedPreview" style="background: #090a0d; padding: 14px; border-radius: 6px; border: 1px solid var(--border); font-family: var(--font-mono); font-size: 12px; max-height: 400px; overflow: auto; color: #a5b4fc;">Загрузка фида...</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="/admin/app.js"></script>
+</body>
+</html>
