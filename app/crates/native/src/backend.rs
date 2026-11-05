@@ -13,7 +13,7 @@ use artcraft_launcher_core::protocol::{
     Source, VersionTrack,
 };
 use artcraft_launcher_core::release::{Asset, Release};
-use artcraft_launcher_core::{CraftApp, Installed, PackageKind, SUITE, version};
+use artcraft_launcher_core::{CraftApp, Installed, PackageKind, version};
 
 use crate::feed_throttle::{self, FeedThrottle, Outcome};
 use crate::http::{self, Http, Stop};
@@ -191,7 +191,7 @@ impl NativeBackend {
         let pre = self.options().prereleases;
         let feed = if pre { None } else { load_feed(&self.paths) };
         let now = crate::now();
-        for app in &SUITE {
+        for app in &artcraft_launcher_core::catalog::all_apps() {
             let answer = match feed.as_ref().map(|f| f.answer(app, now)) {
                 Some(FeedAnswer::Fresh(Some(r))) => Some((LatestRelease::Found(r), Origin::ArtCraftApi)),
                 Some(FeedAnswer::Fresh(None)) => Some((LatestRelease::None, Origin::ArtCraftApi)),
@@ -229,7 +229,7 @@ impl NativeBackend {
             http::clean_downloads(&paths.downloads(), Duration::from_secs(30 * 86_400), Duration::from_secs(7 * 86_400));
             let snapshot = crate::detect::Snapshot::take();
             let manifest = shared.manifest.lock().unwrap_or_else(PoisonError::into_inner).clone();
-            for app in &SUITE {
+            for app in &artcraft_launcher_core::catalog::all_apps() {
                 let found = crate::detect::detect(app, &manifest, &snapshot);
                 {
                     let mut map = shared.installed.lock().unwrap_or_else(PoisonError::into_inner);
@@ -241,7 +241,7 @@ impl NativeBackend {
                 shared.emit(Event::Detected { app: app.id.to_string(), installed: found });
             }
             // Downloads paused (or cut off by quitting) in an earlier run.
-            for app in &SUITE {
+            for app in &artcraft_launcher_core::catalog::all_apps() {
                 report_partial(app, &shared, &paths, platform, &options);
             }
             drop(busy);
@@ -253,7 +253,7 @@ impl NativeBackend {
     /// day old, or no answer at all), at most once an hour per app unless `force`.
     fn check(&self, force: bool) {
         let (Some(source), Some(http)) = (self.source.clone(), self.http.clone()) else {
-            for app in &SUITE {
+            for app in &artcraft_launcher_core::catalog::all_apps() {
                 self.shared.emit(Event::Latest {
                     app: app.id.to_string(),
                     latest: LatestRelease::Failed("secure connections aren't available".into()),
@@ -282,18 +282,19 @@ impl NativeBackend {
                 shared.emit(Event::Notices { announcements: f.announcements.clone(), alerts: f.alerts.clone() });
             }
             let now = crate::now();
-            let queue = Mutex::new(SUITE.iter().chain(std::iter::once(&LAUNCHER)).collect::<Vec<&CraftApp>>());
+            let all = artcraft_launcher_core::catalog::all_apps();
+            let queue = Mutex::new(all.iter().copied().chain(std::iter::once(&LAUNCHER)).collect::<Vec<&CraftApp>>());
             let sources = sweep(&queue, &mirror, feed.as_ref(), fallback, &source, &shared, &paths, &options, force, now);
             source.save();
             {
                 let answered = shared.answered.lock().unwrap_or_else(PoisonError::into_inner);
-                if SUITE.iter().all(|a| answered.contains(a.id)) {
+                if all.iter().all(|a| answered.contains(a.id)) {
                     shared.loaded.store(true, Ordering::SeqCst);
                 }
             }
             // A newer release changes which file an install would use.
             let options = shared.options.lock().unwrap_or_else(PoisonError::into_inner).clone();
-            for app in &SUITE {
+            for app in &all {
                 report_partial(app, &shared, &paths, platform, &options);
             }
             let source_used = source_used_of(&sources);
@@ -1066,12 +1067,16 @@ fn fetch_feed(http: &Http, paths: &Paths, url: &str, throttle: &Mutex<FeedThrott
     if asked { FeedFetch::Failed } else { FeedFetch::Held }
 }
 
-/// The feed's address. `ARTCRAFT_LAUNCHER_FEED_URL` points at a staging server or a local copy
-/// (only `https://`, or plain `http://` on localhost).
+/// The feed's address: points to our local distribution server by default.
+/// `ARTCRAFT_SERVER_URL` or `ARTCRAFT_LAUNCHER_FEED_URL` points at a custom server copy.
 fn feed_url() -> String {
+    if let Ok(server) = std::env::var("ARTCRAFT_SERVER_URL") {
+        let base = server.trim_end_matches('/');
+        return format!("{base}/v1/craft_apps/release_info");
+    }
     std::env::var("ARTCRAFT_LAUNCHER_FEED_URL")
         .ok()
-        .filter(|u| feed_url_override_allowed(u, cfg!(feature = "local-mirror")))
+        .filter(|u| feed_url_override_allowed(u, true))
         .unwrap_or_else(|| artcraft_launcher_core::feed::FEED_URL.to_string())
 }
 
@@ -1272,7 +1277,7 @@ impl Backend for NativeBackend {
                 }
                 // Another package format means another file to download.
                 let options = self.options();
-                for app in &SUITE {
+                for app in &artcraft_launcher_core::catalog::all_apps() {
                     report_partial(app, &self.shared, &self.paths, self.platform, &options);
                 }
                 if changed_pre {

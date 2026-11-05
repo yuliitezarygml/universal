@@ -1,5 +1,6 @@
 mod admin_ui;
 mod catalog;
+mod db;
 mod downloader;
 mod feed;
 mod s3;
@@ -17,7 +18,7 @@ use axum::body::Body;
 use axum::extract::{Multipart, Path, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use serde::Deserialize;
 use serde_json::json;
@@ -84,7 +85,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
 
-    let state = AppState::new(storage_dir.clone(), password.clone(), port, s3_client);
+    // Optional PostgreSQL integration
+    let db_client = match std::env::var("DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            match db::Database::connect(&url).await {
+                Ok(database) => Some(Arc::new(database)),
+                Err(e) => {
+                    tracing::warn!("PostgreSQL database connection failed: {}", e);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
+    let state = AppState::new(storage_dir.clone(), password.clone(), port, s3_client, db_client);
 
     // Warm up the upstream feed cache on startup in background
     let bg_state = state.clone();
@@ -112,6 +127,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/apps/sync", post(trigger_apps_sync_handler))
         .route("/api/s3/status", get(s3_status_handler))
         .route("/api/s3/files", get(s3_files_handler))
+        .route("/api/db/status", get(db_status_handler))
+        .route("/api/db/files", get(db_files_handler))
+        .route("/api/custom-apps", get(list_custom_apps_handler).post(create_custom_app_handler))
+        .route("/api/custom-apps/{id}", put(update_custom_app_handler).delete(delete_custom_app_handler))
+        .route("/api/custom-apps/{id}/assets", post(add_custom_app_asset_handler))
+        .route("/api/custom-apps/{id}/upload-asset", post(upload_custom_app_asset_handler))
+        .route("/api/custom-apps/{id}/assets/{asset_id}", delete(delete_custom_app_asset_handler))
+        .route("/api/custom-apps/{id}/upload-screenshot", post(upload_custom_app_screenshot_handler))
         .route("/ws", get(ws::ws_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -213,6 +236,9 @@ async fn smart_download_handler(
     }
 
     if let Some(local_path) = storage::locate_file(&state.storage_dir, &filename).await {
+        if let Some(db) = &state.db {
+            db.increment_download(&filename).await;
+        }
         // Serve locally from its structured folder using ServeFile
         let serve_file = ServeFile::new(&local_path);
         match serve_file.oneshot(request).await {
@@ -299,6 +325,10 @@ async fn delete_file_handler(
         let _ = s3.delete_object(&format!("{}.sha256", s3_key)).await;
     }
 
+    if let Some(db) = &state.db {
+        db.delete_file(&filename).await;
+    }
+
     match storage::delete_storage_file(&state.storage_dir, &filename).await {
         Ok(_) => {
             state.broadcast_event(&crate::ws::WsServerMessage::FileDeleted {
@@ -361,6 +391,53 @@ async fn s3_files_handler(
         }
     } else {
         (StatusCode::BAD_REQUEST, Json(json!({ "error": "S3 not configured" }))).into_response()
+    }
+}
+
+async fn db_status_handler(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    if let Some(db) = &state.db {
+        let count = db.list_files().await.len();
+        (
+            StatusCode::OK,
+            Json(json!({
+                "connected": true,
+                "engine": "PostgreSQL 16",
+                "registered_files_count": count
+            })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::OK,
+            Json(json!({
+                "connected": false,
+                "message": "PostgreSQL is not configured"
+            })),
+        )
+            .into_response()
+    }
+}
+
+async fn db_files_handler(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    if let Some(db) = &state.db {
+        let files = db.list_files().await;
+        (StatusCode::OK, Json(files)).into_response()
+    } else {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": "Database not configured" }))).into_response()
     }
 }
 
@@ -435,6 +512,23 @@ async fn upload_handler(
 
         info!("File uploaded: {} -> {} (SHA-256: {})", safe_name, rel_path.display(), sha256_hash);
         let folder_name = rel_path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+
+        if let Some(db) = &state.db {
+            let size_bytes = fs::metadata(&dest_path).await.map(|m| m.len() as i64).unwrap_or(0);
+            let content_type = mime_guess::from_path(&dest_path)
+                .first_or_octet_stream()
+                .to_string();
+            db.upsert_file(
+                &safe_name,
+                &rel_path.to_string_lossy(),
+                &folder_name,
+                "upload",
+                size_bytes,
+                &sha256_hash,
+                Some(&content_type),
+            ).await;
+        }
+
         state.broadcast_event(&crate::ws::WsServerMessage::FileAdded {
             filename: safe_name.clone(),
             folder: folder_name.clone(),
@@ -579,4 +673,383 @@ async fn feed_handler(State(state): State<AppState>) -> impl IntoResponse {
         [("Content-Type", "application/json")],
         Json(feed_json),
     )
+}
+
+#[derive(Deserialize)]
+struct CreateCustomAppPayload {
+    id: String,
+    name: String,
+    tagline: String,
+    repo: Option<String>,
+    color: Option<String>,
+    version: Option<String>,
+    notes: Option<String>,
+    mac_team: Option<String>,
+}
+
+async fn list_custom_apps_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if let Some(db) = &state.db {
+        let apps = db.list_custom_apps().await;
+        (StatusCode::OK, Json(apps)).into_response()
+    } else {
+        (StatusCode::OK, Json(json!([]))).into_response()
+    }
+}
+
+async fn create_custom_app_handler(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(payload): Json<CreateCustomAppPayload>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    let id = payload.id.trim().to_lowercase();
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Invalid app id. Use lowercase alphanumeric and hyphens." }))).into_response();
+    }
+    if payload.name.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "App name cannot be empty." }))).into_response();
+    }
+
+    let app = db::CustomApp {
+        id: id.clone(),
+        name: payload.name.trim().to_string(),
+        tagline: payload.tagline.trim().to_string(),
+        repo: payload.repo.unwrap_or_else(|| format!("custom/{}", id)),
+        color: payload.color.unwrap_or_else(|| "#6366f1".to_string()),
+        version: payload.version.unwrap_or_else(|| "1.0.0".to_string()),
+        notes: payload.notes.unwrap_or_default(),
+        mac_team: payload.mac_team,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        assets: Vec::new(),
+        screenshots: Vec::new(),
+    };
+
+    if let Some(db) = &state.db {
+        if let Err(e) = db.upsert_custom_app(&app).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+        }
+        state.broadcast_event(&ws::WsServerMessage::CustomAppUpdated(app.clone()));
+    }
+
+    (StatusCode::CREATED, Json(json!({ "success": true, "app": app }))).into_response()
+}
+
+async fn update_custom_app_handler(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<CreateCustomAppPayload>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    let app = db::CustomApp {
+        id: id.clone(),
+        name: payload.name.trim().to_string(),
+        tagline: payload.tagline.trim().to_string(),
+        repo: payload.repo.unwrap_or_else(|| format!("custom/{}", id)),
+        color: payload.color.unwrap_or_else(|| "#6366f1".to_string()),
+        version: payload.version.unwrap_or_else(|| "1.0.0".to_string()),
+        notes: payload.notes.unwrap_or_default(),
+        mac_team: payload.mac_team,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        assets: Vec::new(),
+        screenshots: Vec::new(),
+    };
+
+    if let Some(db) = &state.db {
+        if let Err(e) = db.upsert_custom_app(&app).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+        }
+        if let Some(full_app) = db.get_custom_app(&id).await {
+            state.broadcast_event(&ws::WsServerMessage::CustomAppUpdated(full_app.clone()));
+            return (StatusCode::OK, Json(json!({ "success": true, "app": full_app }))).into_response();
+        }
+    }
+
+    (StatusCode::OK, Json(json!({ "success": true, "app": app }))).into_response()
+}
+
+async fn delete_custom_app_handler(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    if let Some(db) = &state.db {
+        if let Err(e) = db.delete_custom_app(&id).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+        }
+        state.broadcast_event(&ws::WsServerMessage::CustomAppDeleted { id: id.clone() });
+    }
+
+    (StatusCode::OK, Json(json!({ "success": true }))).into_response()
+}
+
+#[derive(Deserialize)]
+struct AddAssetPayload {
+    filename: String,
+    platform_os: String,
+    platform_arch: String,
+    package_type: String,
+    size_bytes: i64,
+    sha256: String,
+    download_url: Option<String>,
+}
+
+async fn add_custom_app_asset_handler(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<AddAssetPayload>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    let base_url = state.base_url.read().await.clone();
+    let download_url = payload.download_url.unwrap_or_else(|| format!("{}/downloads/{}", base_url, payload.filename));
+    let asset = db::CustomAppAsset {
+        id: uuid::Uuid::new_v4().to_string(),
+        app_id: id.clone(),
+        filename: payload.filename.clone(),
+        platform_os: payload.platform_os,
+        platform_arch: payload.platform_arch,
+        package_type: payload.package_type,
+        size_bytes: payload.size_bytes,
+        sha256: payload.sha256,
+        download_url,
+        s3_key: Some(format!("apps/{}/{}", id, payload.filename)),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    if let Some(db) = &state.db {
+        if let Err(e) = db.upsert_custom_app_asset(&asset).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+        }
+        if let Some(app) = db.get_custom_app(&id).await {
+            state.broadcast_event(&ws::WsServerMessage::CustomAppUpdated(app.clone()));
+            return (StatusCode::CREATED, Json(json!({ "success": true, "app": app, "asset": asset }))).into_response();
+        }
+    }
+
+    (StatusCode::CREATED, Json(json!({ "success": true, "asset": asset }))).into_response()
+}
+
+async fn delete_custom_app_asset_handler(
+    headers: HeaderMap,
+    Path((id, asset_id)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    if let Some(db) = &state.db {
+        if let Err(e) = db.delete_custom_app_asset(&asset_id).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response();
+        }
+        if let Some(app) = db.get_custom_app(&id).await {
+            state.broadcast_event(&ws::WsServerMessage::CustomAppUpdated(app.clone()));
+        }
+    }
+
+    (StatusCode::OK, Json(json!({ "success": true }))).into_response()
+}
+
+async fn upload_custom_app_asset_handler(
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    let mut platform_os = "macos".to_string();
+    let mut platform_arch = "universal".to_string();
+    let mut package_type = "dmg".to_string();
+    let mut uploaded_filename = String::new();
+    let mut uploaded_bytes = 0i64;
+    let mut sha256_hash = String::new();
+
+    let app_dir = state.storage_dir.join("apps").join(&app_id);
+    let _ = fs::create_dir_all(&app_dir).await;
+
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "platform_os" {
+            if let Ok(text) = field.text().await {
+                platform_os = text;
+            }
+        } else if name == "platform_arch" {
+            if let Ok(text) = field.text().await {
+                platform_arch = text;
+            }
+        } else if name == "package_type" {
+            if let Ok(text) = field.text().await {
+                package_type = text;
+            }
+        } else if name == "file" || field.file_name().is_some() {
+            let file_name = field.file_name().unwrap_or("package.bin").to_string();
+            let safe_name = file_name.replace('/', "_").replace('\\', "_").replace("..", "_");
+            uploaded_filename = safe_name.clone();
+
+            let dest_path = app_dir.join(&safe_name);
+            let mut file = match fs::File::create(&dest_path).await {
+                Ok(f) => f,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+            };
+
+            let mut hasher = Sha256::new();
+            while let Ok(Some(chunk)) = field.chunk().await {
+                hasher.update(&chunk);
+                uploaded_bytes += chunk.len() as i64;
+                if let Err(e) = file.write_all(&chunk).await {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                }
+            }
+
+            sha256_hash = hex::encode(hasher.finalize());
+            let sidecar = dest_path.with_extension(format!(
+                "{}.sha256",
+                dest_path.extension().and_then(|s| s.to_str()).unwrap_or("")
+            ));
+            let _ = fs::write(&sidecar, &sha256_hash).await;
+
+            // Upload to MinIO S3
+            let s3_key = format!("apps/{}/{}", app_id, safe_name);
+            if let Some(s3) = &state.s3 {
+                if let Ok(bytes) = fs::read(&dest_path).await {
+                    let content_type = mime_guess::from_path(&dest_path).first_or_octet_stream().to_string();
+                    let _ = s3.put_object(&s3_key, &bytes, &content_type).await;
+                    let _ = s3.put_object(&format!("{}.sha256", s3_key), sha256_hash.as_bytes(), "text/plain").await;
+                }
+            }
+
+            // Register in PostgreSQL files table
+            if let Some(db) = &state.db {
+                db.upsert_file(
+                    &safe_name,
+                    &s3_key,
+                    &format!("apps/{}", app_id),
+                    "custom_app_package",
+                    uploaded_bytes,
+                    &sha256_hash,
+                    Some("application/octet-stream"),
+                ).await;
+            }
+        }
+    }
+
+    if uploaded_filename.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "No file uploaded" }))).into_response();
+    }
+
+    let base_url = state.base_url.read().await.clone();
+    let download_url = format!("{}/downloads/{}", base_url, uploaded_filename);
+    let s3_key = format!("apps/{}/{}", app_id, uploaded_filename);
+
+    let asset = db::CustomAppAsset {
+        id: uuid::Uuid::new_v4().to_string(),
+        app_id: app_id.clone(),
+        filename: uploaded_filename.clone(),
+        platform_os,
+        platform_arch,
+        package_type,
+        size_bytes: uploaded_bytes,
+        sha256: sha256_hash,
+        download_url,
+        s3_key: Some(s3_key),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    if let Some(db) = &state.db {
+        let _ = db.upsert_custom_app_asset(&asset).await;
+        if let Some(app) = db.get_custom_app(&app_id).await {
+            state.broadcast_event(&ws::WsServerMessage::CustomAppUpdated(app.clone()));
+            return (StatusCode::CREATED, Json(json!({ "success": true, "app": app, "asset": asset }))).into_response();
+        }
+    }
+
+    (StatusCode::CREATED, Json(json!({ "success": true, "asset": asset }))).into_response()
+}
+
+async fn upload_custom_app_screenshot_handler(
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    let mut shot_name = "demo".to_string();
+    let mut uploaded_bytes = 0i64;
+
+    let shot_dir = state.storage_dir.join("screenshots").join(&app_id);
+    let _ = fs::create_dir_all(&shot_dir).await;
+
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "shot_name" {
+            if let Ok(text) = field.text().await {
+                shot_name = text.trim().to_string();
+            }
+        } else if name == "file" || field.file_name().is_some() {
+            let clean_name = if shot_name.ends_with(".jpg") || shot_name.ends_with(".jpeg") {
+                shot_name.clone()
+            } else {
+                format!("{}.jpg", shot_name)
+            };
+
+            let dest_path = shot_dir.join(&clean_name);
+            let mut file = match fs::File::create(&dest_path).await {
+                Ok(f) => f,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+            };
+
+            let mut all_bytes = Vec::new();
+            while let Ok(Some(chunk)) = field.chunk().await {
+                all_bytes.extend_from_slice(&chunk);
+                uploaded_bytes += chunk.len() as i64;
+                if let Err(e) = file.write_all(&chunk).await {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+                }
+            }
+
+            // Sync to MinIO S3
+            let s3_key = format!("screenshots/{}/{}", app_id, clean_name);
+            if let Some(s3) = &state.s3 {
+                let _ = s3.put_object(&s3_key, &all_bytes, "image/jpeg").await;
+            }
+
+            // Register in PostgreSQL screenshots table
+            if let Some(db) = &state.db {
+                db.upsert_screenshot(&app_id, &clean_name, &s3_key, uploaded_bytes).await;
+            }
+        }
+    }
+
+    if let Some(db) = &state.db {
+        if let Some(app) = db.get_custom_app(&app_id).await {
+            state.broadcast_event(&ws::WsServerMessage::CustomAppUpdated(app.clone()));
+            return (StatusCode::CREATED, Json(json!({ "success": true, "app": app }))).into_response();
+        }
+    }
+
+    (StatusCode::CREATED, Json(json!({ "success": true }))).into_response()
 }

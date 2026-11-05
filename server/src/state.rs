@@ -39,6 +39,7 @@ pub struct AppState {
     pub tasks_order: Arc<RwLock<Vec<String>>>,
     pub base_url: Arc<RwLock<String>>,
     pub s3: Option<Arc<crate::s3::S3Storage>>,
+    pub db: Option<Arc<crate::db::Database>>,
     pub ws_tx: broadcast::Sender<String>,
 }
 
@@ -48,6 +49,7 @@ impl AppState {
         admin_password: String,
         default_port: u16,
         s3: Option<Arc<crate::s3::S3Storage>>,
+        db: Option<Arc<crate::db::Database>>,
     ) -> Self {
         let (ws_tx, _) = broadcast::channel(512);
         Self {
@@ -57,6 +59,7 @@ impl AppState {
             tasks_order: Arc::new(RwLock::new(Vec::new())),
             base_url: Arc::new(RwLock::new(format!("http://localhost:{}", default_port))),
             s3,
+            db,
             ws_tx,
         }
     }

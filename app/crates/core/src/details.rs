@@ -45,12 +45,8 @@ const fn feature(title: &'static str, text: &'static str) -> Feature {
     Feature { title, text }
 }
 
-/// Where the pictures live: one 1200 px wide, 8:5 JPEG per [`Shot`], at `<app>/<key>.jpg`.
-///
-/// Pinned to a tag (`SCREENSHOTS_REV`) so that what a launcher fetches never changes under it, and
-/// so that a saved copy never goes stale. To change a picture, publish a new tag and bump the
-/// revision: older launchers keep working from the tag they know.
-pub const SCREENSHOTS_BASE: &str = "https://raw.githubusercontent.com/storytold/craft-launcher-assets";
+/// Where the pictures live: served from our distribution server.
+pub const SCREENSHOTS_BASE: &str = "http://localhost:8080/screenshots";
 
 /// The tag of the pictures repository the launcher reads. Also part of the saved copies' path.
 pub const SCREENSHOTS_REV: &str = "v1";
@@ -538,16 +534,57 @@ impl AppDetails {
     /// Where the picture `key` of this app is published, or `None` if the page has no such picture.
     /// The only way to turn a request into an address: callers never build one from their own text.
     pub fn screenshot_url(&self, key: &str) -> Option<String> {
-        self.shots.iter().find(|s| s.key == key).map(|s| format!("{SCREENSHOTS_BASE}/{SCREENSHOTS_REV}/{}/{}.jpg", self.id, s.key))
+        self.shots.iter().find(|s| s.key == key).map(|s| {
+            if let Ok(server) = std::env::var("ARTCRAFT_SERVER_URL") {
+                let base = server.trim_end_matches('/');
+                format!("{base}/screenshots/{}/{}.jpg", self.id, s.key)
+            } else {
+                format!("{SCREENSHOTS_BASE}/{}/{}.jpg", self.id, s.key)
+            }
+        })
     }
 
     pub fn by_id(id: &str) -> Option<&'static AppDetails> {
-        DETAILS.iter().find(|d| d.id == id)
+        if let Some(d) = DETAILS.iter().find(|d| d.id == id) {
+            return Some(d);
+        }
+        if let Ok(custom) = CUSTOM_DETAILS.read() {
+            if let Some(d) = custom.iter().find(|d| d.id == id) {
+                return Some(*d);
+            }
+        }
+        if let Some(app) = crate::CraftApp::by_id(id) {
+            let details = AppDetails {
+                id: app.id,
+                headline: app.tagline,
+                about: Box::leak(format!("{} is a custom application distributed via ArtCraft Server.", app.name).into_boxed_str()),
+                features: Box::leak(Box::new([
+                    Feature { title: "Custom App", text: "Installed and maintained through your ArtCraft distribution server." },
+                ])),
+                shots: Box::leak(Box::new([
+                    Shot { key: "demo", caption: "Main screen preview" },
+                ])),
+                platforms: "macOS, Windows, Linux",
+            };
+            return Some(register_custom_details(details));
+        }
+        None
     }
 
     pub fn paragraphs(&self) -> impl Iterator<Item = &'static str> {
         self.about.split("\n\n").map(str::trim).filter(|p| !p.is_empty())
     }
+}
+
+use std::sync::{LazyLock, RwLock};
+
+static CUSTOM_DETAILS: LazyLock<RwLock<Vec<&'static AppDetails>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+
+pub fn register_custom_details(details: AppDetails) -> &'static AppDetails {
+    let leaked: &'static AppDetails = Box::leak(Box::new(details));
+    let mut list = CUSTOM_DETAILS.write().unwrap_or_else(|e| e.into_inner());
+    list.push(leaked);
+    leaked
 }
 
 #[cfg(test)]
@@ -578,7 +615,7 @@ mod tests {
         let page = AppDetails::by_id("photocraft").unwrap();
         assert_eq!(
             page.screenshot_url("demo").as_deref(),
-            Some("https://raw.githubusercontent.com/storytold/craft-launcher-assets/v1/photocraft/demo.jpg")
+            Some("http://localhost:8080/screenshots/photocraft/demo.jpg")
         );
         for key in ["", "nope", "../vectorcraft/neon", "demo/../masks", "demo.jpg", "/etc/passwd", "demo?x=1", "demo#"] {
             assert_eq!(page.screenshot_url(key), None, "{key:?}");
@@ -587,7 +624,7 @@ mod tests {
         for d in &DETAILS {
             for s in d.shots {
                 let url = d.screenshot_url(s.key).unwrap();
-                let path = url.strip_prefix(&format!("{SCREENSHOTS_BASE}/{SCREENSHOTS_REV}/")).unwrap();
+                let path = url.strip_prefix(&format!("{SCREENSHOTS_BASE}/")).unwrap();
                 assert_eq!(path, format!("{}/{}.jpg", d.id, s.key));
                 assert!(path.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '/' | '-' | '.')), "{path}");
             }

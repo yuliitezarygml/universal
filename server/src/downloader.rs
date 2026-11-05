@@ -187,9 +187,24 @@ pub fn start_download_task(
             task_id, downloaded_bytes, dest_rel.display(), sha256_hash
         );
 
+        let folder_str = dest_rel.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let content_type = mime_guess::from_path(&dest_path).first_or_octet_stream().to_string();
+
+        if let Some(db) = &state.db {
+            db.upsert_file(
+                &safe_name,
+                &dest_rel.to_string_lossy(),
+                &folder_str,
+                "package",
+                downloaded_bytes as i64,
+                &sha256_hash,
+                Some(&content_type),
+            ).await;
+        }
+
         state.broadcast_event(&crate::ws::WsServerMessage::FileAdded {
             filename: safe_name.clone(),
-            folder: dest_rel.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+            folder: folder_str,
             sha256: sha256_hash.clone(),
         });
 
@@ -211,6 +226,47 @@ async fn update_task_status(state: &AppState, task_id: &str, status: TaskStatus)
         task.status = status;
         let task_clone = task.clone();
         drop(tasks);
-        state.broadcast_event(&crate::ws::WsServerMessage::TaskUpdated(task_clone));
+        state.broadcast_event(&crate::ws::WsServerMessage::TaskUpdated(task_clone.clone()));
+
+        if let Some(db) = &state.db {
+            let (status_str, progress, downloaded, total, sha, err) = match &task_clone.status {
+                TaskStatus::Pending => ("pending", 0.0, 0, None, None, None),
+                TaskStatus::Downloading { downloaded, total, percent } => (
+                    "downloading",
+                    *percent,
+                    *downloaded as i64,
+                    total.map(|t| t as i64),
+                    None,
+                    None,
+                ),
+                TaskStatus::Finished { size, sha256 } => (
+                    "finished",
+                    100.0,
+                    *size as i64,
+                    Some(*size as i64),
+                    Some(sha256.as_str()),
+                    None,
+                ),
+                TaskStatus::Failed { error } => (
+                    "failed",
+                    0.0,
+                    0,
+                    None,
+                    None,
+                    Some(error.as_str()),
+                ),
+            };
+            db.upsert_task(
+                &task_clone.id,
+                &task_clone.url,
+                &task_clone.filename,
+                status_str,
+                progress,
+                downloaded,
+                total,
+                sha,
+                err,
+            ).await;
+        }
     }
 }

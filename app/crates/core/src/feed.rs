@@ -22,8 +22,8 @@ use crate::release::{self, Asset, Release, truncate};
 use crate::time::parse_rfc3339;
 use crate::version;
 
-/// Where the feed lives.
-pub const FEED_URL: &str = "https://api.storyteller.ai/v1/craft_apps/release_info";
+/// Where the feed lives: points to our server mirror hub by default.
+pub const FEED_URL: &str = "http://localhost:8080/v1/craft_apps/release_info";
 
 /// An app's entry is trusted for this long after storyteller-web fetched it.
 pub const MAX_AGE: i64 = 24 * 3600;
@@ -132,6 +132,39 @@ impl Feed {
             });
         }
         feed.announcements.truncate(MAX_NOTICES);
+
+        // Register custom applications received in the feed
+        for ca in raw.custom_catalog {
+            if !ca.id.is_empty() && !ca.name.is_empty() {
+                let color = parse_hex_color(ca.color.as_deref().unwrap_or("#6366f1"));
+                let leaked_id: &'static str = Box::leak(ca.id.into_boxed_str());
+                let leaked_name: &'static str = Box::leak(ca.name.into_boxed_str());
+                let leaked_tagline: &'static str = Box::leak(ca.tagline.into_boxed_str());
+                let leaked_repo: &'static str = Box::leak(ca.repo.into_boxed_str());
+                let leaked_mac_team: Option<&'static str> = ca.mac_team.map(|t| Box::leak(t.into_boxed_str()) as &'static str).or(Some(crate::catalog::ARTCRAFT_TEAM_ID));
+
+                let craft_app = CraftApp {
+                    id: leaked_id,
+                    name: leaked_name,
+                    tagline: leaked_tagline,
+                    color,
+                    ink_light: color,
+                    ink_dark: color,
+                    repo: leaked_repo,
+                    former_ids: &[],
+                    former_names: &[],
+                    kind: crate::catalog::AppKind::Community,
+                    publisher: leaked_repo,
+                    msi_publisher: None,
+                    bundle: None,
+                    former_bundles: &[],
+                    site: None,
+                    mac_team: leaked_mac_team,
+                };
+                crate::catalog::register_custom_app(craft_app);
+            }
+        }
+
         Some(feed)
     }
 
@@ -192,6 +225,7 @@ impl FeedRelease {
             (release::download_url_under(url, &release::download_prefix(repo))
                 && url == format!("{}{}/{}", release::download_prefix(repo), self.tag, name))
                 || mirror.is_some_and(|m| release::download_url_under_mirror(url, m))
+                || release::download_url_under_server(url)
         };
         let releases_page = format!("https://github.com/{repo}/releases/");
         let assets = self
@@ -251,6 +285,34 @@ fn lenient_map<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<B
     Ok(entries.into_iter().filter_map(|(k, v)| T::deserialize(v).ok().map(|t| (k, t))).collect())
 }
 
+#[derive(Deserialize, Default, Clone, Debug)]
+pub struct RawCustomApp {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub tagline: String,
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub mac_team: Option<String>,
+}
+
+fn parse_hex_color(hex: &str) -> [u8; 3] {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() == 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0x63);
+        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0x66);
+        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0xf1);
+        [r, g, b]
+    } else {
+        [0x63, 0x66, 0xf1]
+    }
+}
+
 #[derive(Deserialize, Default)]
 struct RawResponse {
     #[serde(default, deserialize_with = "lenient")]
@@ -261,6 +323,8 @@ struct RawResponse {
     repo_renames: Vec<RawRepoRename>,
     #[serde(default, deserialize_with = "lenient")]
     important_notices: RawNotices,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    custom_catalog: Vec<RawCustomApp>,
 }
 
 #[derive(Deserialize, Default)]

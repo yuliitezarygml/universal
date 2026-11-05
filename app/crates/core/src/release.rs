@@ -136,6 +136,37 @@ pub fn download_url_under_mirror(url: &str, base: &str) -> bool {
     !rest.is_empty() && !url.contains(['?', '#', '\\']) && !contains_traversal(rest) && !contains_encoded_separator(rest)
 }
 
+/// Whether `url` sits under our distribution server (`/downloads/<file>`) without escaping it.
+pub fn download_url_under_server(url: &str) -> bool {
+    let prefixes = [
+        "http://localhost:8080/downloads/",
+        "http://127.0.0.1:8080/downloads/",
+        "http://0.0.0.0:8080/downloads/",
+    ];
+    for prefix in prefixes {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            return !rest.is_empty()
+                && !rest.contains('/')
+                && !rest.contains(['?', '#', '\\'])
+                && !contains_traversal(rest)
+                && !contains_encoded_separator(rest)
+                && valid_file_name(rest);
+        }
+    }
+    if let Ok(server) = std::env::var("ARTCRAFT_SERVER_URL") {
+        let prefix = format!("{}/downloads/", server.trim_end_matches('/'));
+        if let Some(rest) = url.strip_prefix(&prefix) {
+            return !rest.is_empty()
+                && !rest.contains('/')
+                && !rest.contains(['?', '#', '\\'])
+                && !contains_traversal(rest)
+                && !contains_encoded_separator(rest)
+                && valid_file_name(rest);
+        }
+    }
+    false
+}
+
 /// `<tag>/<name>`: exactly two non-empty segments, no traversal, no re-interpretable separators.
 fn download_suffix_ok(rest: &str) -> bool {
     if rest.contains(['?', '#', '\\']) || contains_encoded_separator(rest) {

@@ -20,8 +20,45 @@ import {
   LogOut,
   Folder,
   ArrowUpRight,
-  HardDrive
+  HardDrive,
+  Plus,
+  Edit,
+  Image as ImageIcon,
+  Package,
+  X,
+  Sparkles,
+  Tag,
+  Globe
 } from "lucide-react";
+
+interface CustomAppAsset {
+  id: string;
+  app_id: string;
+  filename: string;
+  platform_os: string;
+  platform_arch: string;
+  package_type: string;
+  size_bytes: number;
+  sha256: string;
+  download_url: string;
+  s3_key?: string;
+  created_at: string;
+}
+
+interface CustomApp {
+  id: string;
+  name: string;
+  tagline: string;
+  repo: string;
+  color: string;
+  version: string;
+  notes: string;
+  mac_team?: string;
+  created_at: string;
+  updated_at: string;
+  assets: CustomAppAsset[];
+  screenshots: string[];
+}
 
 interface AppAsset {
   name: string;
@@ -75,13 +112,20 @@ interface S3Status {
   message?: string;
 }
 
+interface DbStatus {
+  connected: boolean;
+  engine?: string;
+  registered_files_count?: number;
+  message?: string;
+}
+
 export default function AdminPage() {
   const [authToken, setAuthToken] = useState<string>("");
   const [isAuthChecking, setIsAuthChecking] = useState(true);
   const [passwordInput, setPasswordInput] = useState("");
   const [loginError, setLoginError] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<"suite" | "storage" | "remote" | "minio">("suite");
+  const [activeTab, setActiveTab] = useState<"suite" | "custom" | "storage" | "remote" | "minio">("suite");
   const [backendUrl, setBackendUrl] = useState(() => {
     if (typeof window !== "undefined") {
       return process.env.NEXT_PUBLIC_API_URL || `${window.location.protocol}//${window.location.hostname}:8080`;
@@ -96,10 +140,38 @@ export default function AdminPage() {
   });
 
   const [s3Status, setS3Status] = useState<S3Status | null>(null);
+  const [dbStatus, setDbStatus] = useState<DbStatus | null>(null);
   const [apps, setApps] = useState<AppSyncStatus[]>([]);
+  const [customApps, setCustomApps] = useState<CustomApp[]>([]);
   const [files, setFiles] = useState<StoredFile[]>([]);
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<string>("all");
+
+  // Custom App modal form states
+  const [isAppModalOpen, setIsAppModalOpen] = useState(false);
+  const [editingApp, setEditingApp] = useState<CustomApp | null>(null);
+  const [appIdInput, setAppIdInput] = useState("");
+  const [appNameInput, setAppNameInput] = useState("");
+  const [appTaglineInput, setAppTaglineInput] = useState("");
+  const [appRepoInput, setAppRepoInput] = useState("");
+  const [appColorInput, setAppColorInput] = useState("#6366f1");
+  const [appVersionInput, setAppVersionInput] = useState("1.0.0");
+  const [appNotesInput, setAppNotesInput] = useState("");
+  const [appMacTeamInput, setAppMacTeamInput] = useState("");
+
+  // Asset upload modal states
+  const [assetModalApp, setAssetModalApp] = useState<CustomApp | null>(null);
+  const [assetOs, setAssetOs] = useState("macos");
+  const [assetArch, setAssetArch] = useState("universal");
+  const [assetPkg, setAssetPkg] = useState("dmg");
+  const [assetFile, setAssetFile] = useState<File | null>(null);
+  const [isUploadingAsset, setIsUploadingAsset] = useState(false);
+
+  // Screenshot upload modal states
+  const [screenshotModalApp, setScreenshotModalApp] = useState<CustomApp | null>(null);
+  const [screenshotFile, setScreenshotFile] = useState<File | null>(null);
+  const [screenshotName, setScreenshotName] = useState("demo");
+  const [isUploadingScreenshot, setIsUploadingScreenshot] = useState(false);
 
   const [remoteUrl, setRemoteUrl] = useState("");
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -178,6 +250,18 @@ export default function AdminPage() {
       if (tasksRes.ok) {
         setTasks(await tasksRes.json());
       }
+
+      // 5. PostgreSQL DB status
+      const dbRes = await fetch(`${backendUrl}/api/db/status`, { headers: authHeaders() });
+      if (dbRes.ok) {
+        setDbStatus(await dbRes.json());
+      }
+
+      // 6. Custom Apps
+      const customAppsRes = await fetch(`${backendUrl}/api/custom-apps`, { headers: authHeaders() });
+      if (customAppsRes.ok) {
+        setCustomApps(await customAppsRes.json());
+      }
     } catch (e) {
       console.error("Error fetching data:", e);
     }
@@ -233,6 +317,12 @@ export default function AdminPage() {
                   bucket: msg.data.s3_bucket,
                 });
               }
+              if (msg.data.db_enabled !== undefined) {
+                setDbStatus({
+                  connected: msg.data.db_enabled,
+                  engine: "PostgreSQL 16",
+                });
+              }
             } else if (msg.type === "task_updated") {
               const updatedTask: DownloadTask = msg.data;
               setTasks((prev) => {
@@ -257,6 +347,12 @@ export default function AdminPage() {
               fetchData();
             } else if (msg.type === "sync_queued") {
               showToast(`Поставлено в очередь загрузок: ${msg.data.queued_count} файлов`);
+              fetchData();
+            } else if (msg.type === "custom_app_updated") {
+              showToast(`Приложение обновлено: ${msg.data.name}`);
+              fetchData();
+            } else if (msg.type === "custom_app_deleted") {
+              showToast(`Приложение удалено`);
               fetchData();
             }
           } catch (e) {
@@ -443,6 +539,186 @@ export default function AdminPage() {
     xhr.send(formData);
   };
 
+  const openCreateAppModal = () => {
+    setEditingApp(null);
+    setAppIdInput("");
+    setAppNameInput("");
+    setAppTaglineInput("");
+    setAppRepoInput("");
+    setAppColorInput("#6366f1");
+    setAppVersionInput("1.0.0");
+    setAppNotesInput("");
+    setAppMacTeamInput("");
+    setIsAppModalOpen(true);
+  };
+
+  const openEditAppModal = (app: CustomApp) => {
+    setEditingApp(app);
+    setAppIdInput(app.id);
+    setAppNameInput(app.name);
+    setAppTaglineInput(app.tagline);
+    setAppRepoInput(app.repo);
+    setAppColorInput(app.color || "#6366f1");
+    setAppVersionInput(app.version || "1.0.0");
+    setAppNotesInput(app.notes || "");
+    setAppMacTeamInput(app.mac_team || "");
+    setIsAppModalOpen(true);
+  };
+
+  const handleSaveApp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!appIdInput.trim() || !appNameInput.trim()) {
+      alert("Заполните ID и название приложения");
+      return;
+    }
+
+    const payload = {
+      id: appIdInput.trim().toLowerCase(),
+      name: appNameInput.trim(),
+      tagline: appTaglineInput.trim(),
+      repo: appRepoInput.trim() || `custom/${appIdInput.trim().toLowerCase()}`,
+      color: appColorInput,
+      version: appVersionInput.trim() || "1.0.0",
+      notes: appNotesInput.trim(),
+      mac_team: appMacTeamInput.trim() || undefined,
+    };
+
+    try {
+      const url = editingApp
+        ? `${backendUrl}/api/custom-apps/${encodeURIComponent(editingApp.id)}`
+        : `${backendUrl}/api/custom-apps`;
+      const method = editingApp ? "PUT" : "POST";
+
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        showToast(editingApp ? "Приложение обновлено" : "Приложение создано!");
+        setIsAppModalOpen(false);
+        fetchData();
+      } else {
+        const err = await res.json();
+        alert("Ошибка: " + (err.error || "Не удалось сохранить"));
+      }
+    } catch (err) {
+      alert("Ошибка сети: " + err);
+    }
+  };
+
+  const handleDeleteCustomApp = async (id: string, name: string) => {
+    if (!confirm(`Удалить приложение "${name}" и все его пакеты?`)) return;
+    if (sendWs({ action: "delete_custom_app", id })) {
+      return;
+    }
+    try {
+      const res = await fetch(`${backendUrl}/api/custom-apps/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        showToast("Приложение удалено");
+        fetchData();
+      } else {
+        alert("Ошибка удаления приложения");
+      }
+    } catch (err) {
+      alert("Ошибка сети: " + err);
+    }
+  };
+
+  const handleUploadAssetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!assetModalApp || !assetFile) {
+      alert("Выберите файл пакета");
+      return;
+    }
+
+    setIsUploadingAsset(true);
+    const formData = new FormData();
+    formData.append("file", assetFile);
+    formData.append("platform_os", assetOs);
+    formData.append("platform_arch", assetArch);
+    formData.append("package_type", assetPkg);
+
+    try {
+      const res = await fetch(`${backendUrl}/api/custom-apps/${assetModalApp.id}/upload-asset`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: formData,
+      });
+
+      if (res.ok) {
+        showToast(`Пакет "${assetFile.name}" прикреплен к ${assetModalApp.name}!`);
+        setAssetModalApp(null);
+        setAssetFile(null);
+        fetchData();
+      } else {
+        const err = await res.json();
+        alert("Ошибка загрузки пакета: " + (err.error || "Ошибка"));
+      }
+    } catch (err) {
+      alert("Ошибка сети: " + err);
+    } finally {
+      setIsUploadingAsset(false);
+    }
+  };
+
+  const handleDeleteAsset = async (appId: string, assetId: string, filename: string) => {
+    if (!confirm(`Удалить пакет "${filename}"?`)) return;
+    try {
+      const res = await fetch(`${backendUrl}/api/custom-apps/${encodeURIComponent(appId)}/assets/${encodeURIComponent(assetId)}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        showToast("Пакет удален");
+        fetchData();
+      } else {
+        alert("Ошибка удаления пакета");
+      }
+    } catch (err) {
+      alert("Ошибка сети: " + err);
+    }
+  };
+
+  const handleUploadScreenshotSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!screenshotModalApp || !screenshotFile) {
+      alert("Выберите изображение скриншота (.jpg)");
+      return;
+    }
+
+    setIsUploadingScreenshot(true);
+    const formData = new FormData();
+    formData.append("file", screenshotFile);
+    formData.append("shot_name", screenshotName.trim() || "demo");
+
+    try {
+      const res = await fetch(`${backendUrl}/api/custom-apps/${screenshotModalApp.id}/upload-screenshot`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: formData,
+      });
+
+      if (res.ok) {
+        showToast(`Скриншот загружен для ${screenshotModalApp.name}!`);
+        setScreenshotModalApp(null);
+        setScreenshotFile(null);
+        fetchData();
+      } else {
+        const err = await res.json();
+        alert("Ошибка загрузки скриншота: " + (err.error || "Ошибка"));
+      }
+    } catch (err) {
+      alert("Ошибка сети: " + err);
+    } finally {
+      setIsUploadingScreenshot(false);
+    }
+  };
+
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return "0 B";
     const k = 1024;
@@ -564,6 +840,18 @@ export default function AdminPage() {
             )}
           </div>
 
+          {/* PostgreSQL Status Pill */}
+          <div
+            className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium border transition ${
+              dbStatus?.connected
+                ? "bg-sky-500/10 text-sky-400 border-sky-500/25"
+                : "bg-slate-500/10 text-slate-400 border-slate-500/25"
+            }`}
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>{dbStatus?.connected ? "PostgreSQL 16" : "Postgres Offline"}</span>
+          </div>
+
           {/* S3 Status Pill */}
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium bg-[#10b981]/10 text-[#10b981] border border-[#10b981]/25">
             <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
@@ -595,17 +883,30 @@ export default function AdminPage() {
       {/* Main Container */}
       <main className="max-w-7xl w-full mx-auto p-6 flex-1 flex flex-col gap-6">
         {/* Stats Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           <div className="bg-[#12141a] border border-[#232630] rounded-xl p-5">
             <div className="text-xs font-semibold text-[#8b92a5] uppercase tracking-wider mb-2 flex items-center justify-between">
-              <span>Хранилище MinIO S3</span>
-              <Database className="w-4 h-4 text-[#ff5722]" />
+              <span>Хранилище S3</span>
+              <Cloud className="w-4 h-4 text-[#ff5722]" />
             </div>
-            <div className="text-xl font-bold font-mono text-white">
+            <div className="text-xl font-bold font-mono text-white truncate">
               {s3Status?.bucket || "artcraft-packages"}
             </div>
             <div className="text-xs text-[#8b92a5] mt-1 truncate">
-              {s3Status?.endpoint || "http://minio:9000"}
+              MinIO Community
+            </div>
+          </div>
+
+          <div className="bg-[#12141a] border border-[#232630] rounded-xl p-5">
+            <div className="text-xs font-semibold text-[#8b92a5] uppercase tracking-wider mb-2 flex items-center justify-between">
+              <span>База данных</span>
+              <Database className="w-4 h-4 text-sky-400" />
+            </div>
+            <div className="text-xl font-bold font-mono text-white">
+              {dbStatus?.connected ? "PostgreSQL 16" : "Память"}
+            </div>
+            <div className="text-xs text-[#8b92a5] mt-1 truncate">
+              {dbStatus?.connected ? `Записей в БД: ${dbStatus.registered_files_count ?? 0}` : "artcraft"}
             </div>
           </div>
 
@@ -650,7 +951,18 @@ export default function AdminPage() {
             }`}
           >
             <Layers className="w-4 h-4" />
-            <span>Каталог приложений (Suite Sync)</span>
+            <span>Каталог Suite Sync</span>
+          </button>
+          <button
+            onClick={() => setActiveTab("custom")}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition flex items-center gap-2 whitespace-nowrap ${
+              activeTab === "custom"
+                ? "border-[#ff5722] text-white"
+                : "border-transparent text-[#8b92a5] hover:text-white"
+            }`}
+          >
+            <Sparkles className="w-4 h-4 text-amber-400" />
+            <span>Мои программы ({customApps.length})</span>
           </button>
           <button
             onClick={() => setActiveTab("storage")}
@@ -795,6 +1107,238 @@ export default function AdminPage() {
                 );
               })}
             </div>
+          </div>
+        )}
+
+        {/* TAB: CUSTOM APPS */}
+        {activeTab === "custom" && (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#12141a] border border-[#232630] rounded-xl p-5">
+              <div>
+                <h3 className="font-semibold text-base text-white flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-amber-400" />
+                  <span>Кастомные программы (Custom Apps)</span>
+                </h3>
+                <p className="text-xs text-[#8b92a5] mt-1">
+                  Добавляйте свои приложения. Они автоматически транслируются в лаунчер и раздаются из MinIO S3.
+                </p>
+              </div>
+
+              <button
+                onClick={openCreateAppModal}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#ff5722] hover:bg-[#f4511e] text-white rounded-lg text-xs font-semibold shadow-lg shadow-[#ff5722]/20 transition"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Добавить программу</span>
+              </button>
+            </div>
+
+            {customApps.length === 0 ? (
+              <div className="bg-[#12141a] border border-[#232630] rounded-xl p-12 text-center">
+                <Package className="w-12 h-12 text-[#8b92a5] mx-auto mb-3 opacity-60" />
+                <h4 className="text-sm font-semibold text-white mb-1">
+                  У вас пока нет своих программ
+                </h4>
+                <p className="text-xs text-[#8b92a5] max-w-md mx-auto mb-5">
+                  Создайте свою первую программу: укажите название, версию, цвет, загрузите установочный файл (.dmg / .msi / .AppImage) и скриншоты.
+                </p>
+                <button
+                  onClick={openCreateAppModal}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-[#ff5722] hover:bg-[#f4511e] text-white rounded-lg text-xs font-semibold transition"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Добавить программу</span>
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {customApps.map((app) => (
+                  <div
+                    key={app.id}
+                    className="bg-[#12141a] border border-[#232630] rounded-xl p-6 flex flex-col justify-between hover:border-[#353949] transition shadow-md"
+                    style={{ borderTopColor: app.color, borderTopWidth: "3px" }}
+                  >
+                    <div>
+                      {/* Header */}
+                      <div className="flex items-start justify-between gap-3 mb-3">
+                        <div className="flex items-center gap-3">
+                          <span
+                            className="w-4 h-4 rounded-full flex-shrink-0 shadow-sm"
+                            style={{ backgroundColor: app.color }}
+                          />
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <h4 className="font-bold text-base text-white">{app.name}</h4>
+                              <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-[#1b1e26] border border-[#262a36] text-[#a5b4fc]">
+                                v{app.version}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-[#8b92a5] font-mono mt-0.5">
+                              ID: {app.id} • {app.repo}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => openEditAppModal(app)}
+                            className="p-1.5 rounded-lg bg-[#1b1e26] hover:bg-[#252936] text-[#8b92a5] hover:text-white border border-[#262a36] transition"
+                            title="Редактировать приложение"
+                          >
+                            <Edit className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteCustomApp(app.id, app.name)}
+                            className="p-1.5 rounded-lg bg-[#1b1e26] hover:bg-rose-500/20 text-[#8b92a5] hover:text-rose-400 border border-[#262a36] hover:border-rose-500/30 transition"
+                            title="Удалить приложение"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Tagline */}
+                      <p className="text-xs text-[#d1d5db] mb-4 bg-[#0b0c0f] p-3 rounded-lg border border-[#1e212b]">
+                        {app.tagline || "Нет описания"}
+                      </p>
+
+                      {/* Release notes if present */}
+                      {app.notes && (
+                        <div className="text-[11px] text-[#8b92a5] mb-4 bg-[#0b0c0f]/60 p-2.5 rounded border border-[#1e212b] line-clamp-2">
+                          <span className="text-white font-medium">Заметки: </span> {app.notes}
+                        </div>
+                      )}
+
+                      {/* Assets Section */}
+                      <div className="mb-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                            <Package className="w-3.5 h-3.5 text-sky-400" />
+                            <span>Установочные пакеты ({app.assets.length})</span>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setAssetModalApp(app);
+                              setAssetFile(null);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#1b1e26] hover:bg-[#252936] text-white border border-[#262a36] text-[11px] font-medium transition"
+                          >
+                            <Plus className="w-3 h-3 text-[#10b981]" />
+                            <span>Загрузить пакет</span>
+                          </button>
+                        </div>
+
+                        {app.assets.length === 0 ? (
+                          <div className="text-center py-4 bg-[#0b0c0f] rounded-lg border border-[#1e212b] text-[11px] text-[#8b92a5]">
+                            Нет прикрепленных пакетов. Нажмите «Загрузить пакет».
+                          </div>
+                        ) : (
+                          <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                            {app.assets.map((asset) => (
+                              <div
+                                key={asset.id}
+                                className="flex items-center justify-between bg-[#0b0c0f] px-3 py-2 rounded-lg border border-[#1e212b] text-xs"
+                              >
+                                <div className="min-w-0 pr-2">
+                                  <div className="font-mono text-white text-[11px] truncate flex items-center gap-2">
+                                    <span className="px-1.5 py-0.2 rounded text-[10px] bg-indigo-500/15 text-indigo-300 font-sans uppercase">
+                                      {asset.platform_os} • {asset.package_type}
+                                    </span>
+                                    <span className="truncate">{asset.filename}</span>
+                                  </div>
+                                  <div className="text-[10px] text-[#8b92a5] flex items-center gap-2 mt-0.5">
+                                    <span>{formatBytes(asset.size_bytes)}</span>
+                                    <span>•</span>
+                                    <span className="font-mono truncate max-w-[140px]" title={asset.sha256}>
+                                      {asset.sha256 ? `${asset.sha256.substring(0, 12)}...` : "хэш не указан"}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 flex-shrink-0">
+                                  <a
+                                    href={asset.download_url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="p-1 rounded bg-[#1b1e26] hover:bg-[#252936] text-[#ededed] border border-[#262a36] transition"
+                                    title="Скачать"
+                                  >
+                                    <Download className="w-3 h-3 text-[#10b981]" />
+                                  </a>
+                                  <button
+                                    onClick={() => copyToClipboard(asset.sha256)}
+                                    className="p-1 rounded bg-[#1b1e26] hover:bg-[#252936] text-[#8b92a5] hover:text-white border border-[#262a36] transition"
+                                    title="Скопировать SHA-256"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteAsset(app.id, asset.id, asset.filename)}
+                                    className="p-1 rounded bg-[#1b1e26] hover:bg-rose-500/20 text-[#8b92a5] hover:text-rose-400 border border-[#262a36] transition"
+                                    title="Удалить пакет"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Screenshots Section */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                            <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Скриншоты ({app.screenshots.length})</span>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setScreenshotModalApp(app);
+                              setScreenshotFile(null);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#1b1e26] hover:bg-[#252936] text-white border border-[#262a36] text-[11px] font-medium transition"
+                          >
+                            <Plus className="w-3 h-3 text-amber-400" />
+                            <span>Загрузить скриншот</span>
+                          </button>
+                        </div>
+
+                        {app.screenshots.length === 0 ? (
+                          <div className="text-center py-3 bg-[#0b0c0f] rounded-lg border border-[#1e212b] text-[11px] text-[#8b92a5]">
+                            Нет скриншотов. Нажмите «Загрузить скриншот» (.jpg).
+                          </div>
+                        ) : (
+                          <div className="flex gap-2 overflow-x-auto pb-1">
+                            {app.screenshots.map((shot) => {
+                              const shotKey = shot.replace(/\.jpg$/, "");
+                              const imgUrl = `${backendUrl}/screenshots/${app.id}/${shotKey}.jpg`;
+                              return (
+                                <div
+                                  key={shot}
+                                  className="relative group rounded-lg overflow-hidden border border-[#262a36] bg-[#0b0c0f] flex-shrink-0 w-32 h-20"
+                                >
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={imgUrl}
+                                    alt={shot}
+                                    className="w-full h-full object-cover"
+                                  />
+                                  <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-1 text-[10px] text-white">
+                                    <span>{shotKey}</span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -1115,6 +1659,347 @@ export default function AdminPage() {
                   ARTCRAFT_LAUNCHER_DOWNLOAD_BASE={backendUrl}/downloads/ cargo run
                 </pre>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL 1: CREATE / EDIT APP */}
+        {isAppModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm animate-fade-in">
+            <div className="bg-[#12141a] border border-[#2a2e3d] rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5">
+              <div className="flex items-center justify-between border-b border-[#232630] pb-3">
+                <h3 className="font-bold text-base text-white flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  <span>{editingApp ? "Редактировать приложение" : "Добавить новую программу"}</span>
+                </h3>
+                <button
+                  onClick={() => setIsAppModalOpen(false)}
+                  className="p-1 rounded-lg text-[#8b92a5] hover:text-white hover:bg-[#1e212b] transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveApp} className="space-y-4 text-xs">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[#8b92a5] font-medium mb-1">ID приложения (slug)</label>
+                    <input
+                      type="text"
+                      disabled={!!editingApp}
+                      value={appIdInput}
+                      onChange={(e) => setAppIdInput(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))}
+                      placeholder="например: retrocraft"
+                      className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white font-mono focus:border-[#ff5722] focus:outline-none disabled:opacity-50"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[#8b92a5] font-medium mb-1">Название программы</label>
+                    <input
+                      type="text"
+                      value={appNameInput}
+                      onChange={(e) => setAppNameInput(e.target.value)}
+                      placeholder="например: RetroCraft"
+                      className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white focus:border-[#ff5722] focus:outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[#8b92a5] font-medium mb-1">Краткое описание (Tagline)</label>
+                  <input
+                    type="text"
+                    value={appTaglineInput}
+                    onChange={(e) => setAppTaglineInput(e.target.value)}
+                    placeholder="например: Редактор пиксельной графики и тайлов"
+                    className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white focus:border-[#ff5722] focus:outline-none"
+                    required
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[#8b92a5] font-medium mb-1">Разработчик / Репозиторий</label>
+                    <input
+                      type="text"
+                      value={appRepoInput}
+                      onChange={(e) => setAppRepoInput(e.target.value)}
+                      placeholder="например: myteam/retrocraft"
+                      className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white font-mono focus:border-[#ff5722] focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[#8b92a5] font-medium mb-1">Текущая версия</label>
+                    <input
+                      type="text"
+                      value={appVersionInput}
+                      onChange={(e) => setAppVersionInput(e.target.value)}
+                      placeholder="1.0.0"
+                      className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white font-mono focus:border-[#ff5722] focus:outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[#8b92a5] font-medium mb-1">Цвет акцента / Бренда</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={appColorInput}
+                        onChange={(e) => setAppColorInput(e.target.value)}
+                        className="w-8 h-8 rounded border-0 bg-transparent cursor-pointer p-0"
+                      />
+                      <input
+                        type="text"
+                        value={appColorInput}
+                        onChange={(e) => setAppColorInput(e.target.value)}
+                        className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white font-mono focus:border-[#ff5722] focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[#8b92a5] font-medium mb-1">Apple Team ID (macOS, опционально)</label>
+                    <input
+                      type="text"
+                      value={appMacTeamInput}
+                      onChange={(e) => setAppMacTeamInput(e.target.value)}
+                      placeholder="например: ARTCRAFT или 10-значный ID"
+                      className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white font-mono focus:border-[#ff5722] focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[#8b92a5] font-medium mb-1">Заметки о релизе (Release Notes)</label>
+                  <textarea
+                    rows={3}
+                    value={appNotesInput}
+                    onChange={(e) => setAppNotesInput(e.target.value)}
+                    placeholder="Что нового в этой версии (поддерживает Markdown)..."
+                    className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white focus:border-[#ff5722] focus:outline-none resize-none"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-3 border-t border-[#232630]">
+                  <button
+                    type="button"
+                    onClick={() => setIsAppModalOpen(false)}
+                    className="px-4 py-2 rounded-lg bg-[#1b1e26] hover:bg-[#252936] text-[#8b92a5] hover:text-white transition font-medium"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 rounded-lg bg-[#ff5722] hover:bg-[#f4511e] text-white font-semibold shadow-lg shadow-[#ff5722]/20 transition"
+                  >
+                    {editingApp ? "Сохранить изменения" : "Создать приложение"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL 2: UPLOAD PACKAGE ASSET */}
+        {assetModalApp && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm animate-fade-in">
+            <div className="bg-[#12141a] border border-[#2a2e3d] rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-5">
+              <div className="flex items-center justify-between border-b border-[#232630] pb-3">
+                <div>
+                  <h3 className="font-bold text-base text-white flex items-center gap-2">
+                    <Package className="w-4 h-4 text-sky-400" />
+                    <span>Загрузить пакет в MinIO S3</span>
+                  </h3>
+                  <div className="text-xs text-[#8b92a5] mt-0.5">
+                    Для приложения: <span className="text-white font-semibold">{assetModalApp.name}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setAssetModalApp(null)}
+                  className="p-1 rounded-lg text-[#8b92a5] hover:text-white hover:bg-[#1e212b] transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleUploadAssetSubmit} className="space-y-4 text-xs">
+                <div>
+                  <label className="block text-[#8b92a5] font-medium mb-1">Файл дистрибутива (.dmg, .msi, .AppImage, .zip)</label>
+                  <input
+                    type="file"
+                    onChange={(e) => setAssetFile(e.target.files?.[0] || null)}
+                    className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white file:mr-3 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#ff5722] file:text-white hover:file:bg-[#f4511e] cursor-pointer"
+                    required
+                  />
+                  {assetFile && (
+                    <div className="mt-1 text-[11px] text-[#10b981]">
+                      Выбран: {assetFile.name} ({formatBytes(assetFile.size)})
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[#8b92a5] font-medium mb-1">Операционная система</label>
+                    <select
+                      value={assetOs}
+                      onChange={(e) => setAssetOs(e.target.value)}
+                      className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white focus:border-[#ff5722] focus:outline-none"
+                    >
+                      <option value="macos">🍎 macOS</option>
+                      <option value="windows">🪟 Windows</option>
+                      <option value="linux">🐧 Linux</option>
+                      <option value="web">🌐 Web</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[#8b92a5] font-medium mb-1">Архитектура процессора</label>
+                    <select
+                      value={assetArch}
+                      onChange={(e) => setAssetArch(e.target.value)}
+                      className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white focus:border-[#ff5722] focus:outline-none"
+                    >
+                      <option value="universal">Universal (All)</option>
+                      <option value="arm64">Apple Silicon / ARM64</option>
+                      <option value="x64">Intel / AMD x64</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[#8b92a5] font-medium mb-1">Тип установочного пакета</label>
+                  <select
+                    value={assetPkg}
+                    onChange={(e) => setAssetPkg(e.target.value)}
+                    className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white focus:border-[#ff5722] focus:outline-none"
+                  >
+                    <option value="dmg">Apple Disk Image (.dmg)</option>
+                    <option value="msi">Windows Installer (.msi)</option>
+                    <option value="app_image">Linux AppImage (.AppImage)</option>
+                    <option value="deb">Debian / Ubuntu Package (.deb)</option>
+                    <option value="portable_zip">Portable ZIP (.zip)</option>
+                    <option value="zip">Archive ZIP (.zip)</option>
+                    <option value="tar_gz">Tarball (.tar.gz)</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-3 border-t border-[#232630]">
+                  <button
+                    type="button"
+                    onClick={() => setAssetModalApp(null)}
+                    disabled={isUploadingAsset}
+                    className="px-4 py-2 rounded-lg bg-[#1b1e26] hover:bg-[#252936] text-[#8b92a5] hover:text-white transition font-medium disabled:opacity-50"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isUploadingAsset || !assetFile}
+                    className="px-5 py-2 rounded-lg bg-[#ff5722] hover:bg-[#f4511e] text-white font-semibold shadow-lg shadow-[#ff5722]/20 transition disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isUploadingAsset ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Загрузка в S3...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Загрузить пакет</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL 3: UPLOAD SCREENSHOT */}
+        {screenshotModalApp && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm animate-fade-in">
+            <div className="bg-[#12141a] border border-[#2a2e3d] rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-5">
+              <div className="flex items-center justify-between border-b border-[#232630] pb-3">
+                <div>
+                  <h3 className="font-bold text-base text-white flex items-center gap-2">
+                    <ImageIcon className="w-4 h-4 text-amber-400" />
+                    <span>Загрузить скриншот программы</span>
+                  </h3>
+                  <div className="text-xs text-[#8b92a5] mt-0.5">
+                    Для: <span className="text-white font-semibold">{screenshotModalApp.name}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setScreenshotModalApp(null)}
+                  className="p-1 rounded-lg text-[#8b92a5] hover:text-white hover:bg-[#1e212b] transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleUploadScreenshotSubmit} className="space-y-4 text-xs">
+                <div>
+                  <label className="block text-[#8b92a5] font-medium mb-1">Изображение скриншота (JPEG / PNG)</label>
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    onChange={(e) => setScreenshotFile(e.target.files?.[0] || null)}
+                    className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white file:mr-3 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-[#ff5722] file:text-white hover:file:bg-[#f4511e] cursor-pointer"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[#8b92a5] font-medium mb-1">Имя ключа скриншота</label>
+                  <input
+                    type="text"
+                    value={screenshotName}
+                    onChange={(e) => setScreenshotName(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))}
+                    placeholder="demo"
+                    className="w-full bg-[#0b0c0f] border border-[#262a36] rounded-lg px-3 py-2 text-white font-mono focus:border-[#ff5722] focus:outline-none"
+                    required
+                  />
+                  <div className="text-[10px] text-[#8b92a5] mt-1">
+                    Основной скриншот для карточки лаунчера должен иметь ключ: <code className="text-[#a5b4fc]">demo</code>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-3 border-t border-[#232630]">
+                  <button
+                    type="button"
+                    onClick={() => setScreenshotModalApp(null)}
+                    disabled={isUploadingScreenshot}
+                    className="px-4 py-2 rounded-lg bg-[#1b1e26] hover:bg-[#252936] text-[#8b92a5] hover:text-white transition font-medium disabled:opacity-50"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isUploadingScreenshot || !screenshotFile}
+                    className="px-5 py-2 rounded-lg bg-[#ff5722] hover:bg-[#f4511e] text-white font-semibold shadow-lg shadow-[#ff5722]/20 transition disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isUploadingScreenshot ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Загрузка...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Загрузить в S3</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
         )}

@@ -7,7 +7,7 @@ use artcraft_launcher_core::protocol::{
 };
 use artcraft_launcher_core::release::Release;
 use artcraft_launcher_core::status::AppStatus;
-use artcraft_launcher_core::{Arch, PackageKind, Platform, SUITE};
+use artcraft_launcher_core::{Arch, PackageKind, Platform};
 
 use crate::i18n::set_current;
 use crate::model::AppEntry;
@@ -258,7 +258,7 @@ impl LauncherUi {
         Self {
             backend,
             settings,
-            entries: SUITE.iter().map(AppEntry::new).collect(),
+            entries: artcraft_launcher_core::catalog::all_apps().into_iter().map(AppEntry::new).collect(),
             caps,
             platform,
             checking: false,
@@ -440,6 +440,11 @@ impl LauncherUi {
     }
 
     fn entry_mut(&mut self, id: &str) -> Option<&mut AppEntry> {
+        if !self.entries.iter().any(|e| e.app.id == id) {
+            if let Some(app) = artcraft_launcher_core::CraftApp::by_id(id) {
+                self.entries.push(AppEntry::new(app));
+            }
+        }
         self.entries.iter_mut().find(|e| e.app.id == id)
     }
 

@@ -91,8 +91,44 @@ impl CraftApp {
     }
 
     pub fn by_id(id: &str) -> Option<&'static CraftApp> {
-        SUITE.iter().find(|a| a.id == id)
+        if let Some(a) = SUITE.iter().find(|a| a.id == id) {
+            return Some(a);
+        }
+        if let Ok(custom) = CUSTOM_APPS.read() {
+            if let Some(a) = custom.iter().find(|a| a.id == id) {
+                return Some(*a);
+            }
+        }
+        None
     }
+}
+
+use std::sync::{LazyLock, RwLock};
+
+static CUSTOM_APPS: LazyLock<RwLock<Vec<&'static CraftApp>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+
+/// Registers a custom application at runtime (e.g. from server feed).
+pub fn register_custom_app(app: CraftApp) -> &'static CraftApp {
+    let mut list = CUSTOM_APPS.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = list.iter().find(|a| a.id == app.id) {
+        return *existing;
+    }
+    let leaked: &'static CraftApp = Box::leak(Box::new(app));
+    list.push(leaked);
+    leaked
+}
+
+/// All apps available to the launcher: built-in SUITE plus any registered custom apps.
+pub fn all_apps() -> Vec<&'static CraftApp> {
+    let mut res: Vec<&'static CraftApp> = SUITE.iter().collect();
+    if let Ok(custom) = CUSTOM_APPS.read() {
+        for app in custom.iter() {
+            if !res.iter().any(|a| a.id == app.id) {
+                res.push(app);
+            }
+        }
+    }
+    res
 }
 
 const fn app(
@@ -302,7 +338,13 @@ pub fn app_icon_png(id: &str) -> Option<&'static [u8]> {
         "cadcraft" => include_bytes!("../../../assets/app-icons/cadcraft.png"),
         "soundcraft" => include_bytes!("../../../assets/app-icons/soundcraft.png"),
         "figcraft" => include_bytes!("../../../assets/app-icons/figcraft.png"),
-        _ => return None,
+        _ => {
+            if CraftApp::by_id(id).is_some() {
+                include_bytes!("../../../assets/app-icons/craft-anything.png")
+            } else {
+                return None;
+            }
+        }
     })
 }
 

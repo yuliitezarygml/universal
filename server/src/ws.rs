@@ -34,6 +34,9 @@ pub enum WsClientCommand {
     DeleteFile {
         filename: String,
     },
+    DeleteCustomApp {
+        id: String,
+    },
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -45,6 +48,7 @@ pub enum WsServerMessage {
         tasks: Vec<DownloadTask>,
         s3_enabled: bool,
         s3_bucket: Option<String>,
+        db_enabled: bool,
         storage_dir: String,
         version: &'static str,
     },
@@ -56,6 +60,10 @@ pub enum WsServerMessage {
     },
     FileDeleted {
         filename: String,
+    },
+    CustomAppUpdated(crate::db::CustomApp),
+    CustomAppDeleted {
+        id: String,
     },
     SyncQueued {
         queued_count: usize,
@@ -216,6 +224,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut is_authenticated:
                                     let _ = crate::storage::delete_storage_file(&app_state.storage_dir, &filename).await;
                                     app_state.broadcast_event(&WsServerMessage::FileDeleted { filename });
                                 }
+                                WsClientCommand::DeleteCustomApp { id } => {
+                                    if let Some(db) = &app_state.db {
+                                        let _ = db.delete_custom_app(&id).await;
+                                        app_state.broadcast_event(&WsServerMessage::CustomAppDeleted { id });
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
@@ -254,11 +268,13 @@ async fn create_init_message(state: &AppState) -> WsServerMessage {
         Some(s) => (true, Some(s.config.bucket.clone())),
         None => (false, None),
     };
+    let db_enabled = state.db.is_some();
 
     WsServerMessage::Init {
         tasks,
         s3_enabled,
         s3_bucket,
+        db_enabled,
         storage_dir: state.storage_dir.display().to_string(),
         version: env!("CARGO_PKG_VERSION"),
     }

@@ -20,5 +20,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 mime_guess = "2.0"
 rust-s3 = { version = "0.38", default-features = false, features = ["tokio-rustls-tls"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+deadpool-postgres = { version = "0.14" }
 
 

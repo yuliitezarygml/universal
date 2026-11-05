@@ -117,6 +117,45 @@ pub async fn get_suite_sync_status(state: &AppState) -> Vec<AppSyncStatus> {
         result.push(app_status);
     }
 
+    // Append custom apps from PostgreSQL
+    if let Some(db) = &state.db {
+        let custom_apps = db.list_custom_apps().await;
+        for ca in custom_apps {
+            let mut assets = Vec::new();
+            let mut cached = 0;
+            for a in &ca.assets {
+                let is_cached = local_map.contains_key(&a.filename);
+                if is_cached {
+                    cached += 1;
+                }
+                assets.push(AppAssetStatus {
+                    name: a.filename.clone(),
+                    size: a.size_bytes as u64,
+                    sha256: a.sha256.clone(),
+                    download_url: a.download_url.clone(),
+                    is_cached,
+                    local_download_url: if is_cached {
+                        Some(format!("{}/downloads/{}", base_url, a.filename))
+                    } else {
+                        None
+                    },
+                });
+            }
+            result.push(AppSyncStatus {
+                id: ca.id,
+                name: ca.name,
+                repo: ca.repo,
+                description: ca.tagline,
+                color: ca.color,
+                latest_tag: Some(format!("v{}", ca.version)),
+                published_at: Some(ca.updated_at),
+                total_assets: assets.len(),
+                cached_assets: cached,
+                assets,
+            });
+        }
+    }
+
     result
 }
 

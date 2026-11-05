@@ -20,10 +20,22 @@ pub async fn screenshot_proxy_handler(
         return (StatusCode::BAD_REQUEST, "Invalid path parameters").into_response();
     }
 
+    let s3_key = format!("screenshots/{}/{}", app, shot);
+
+    // 1. Check MinIO S3 first if configured
+    if let Some(s3) = &state.s3 {
+        if let Ok(bytes) = s3.get_object(&s3_key).await {
+            return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "image/jpeg"), (header::CACHE_CONTROL, "public, max-age=86400")],
+                bytes,
+            ).into_response();
+        }
+    }
+
+    // 2. Check local disk cache
     let cache_dir = state.storage_dir.join("screenshots").join(&app);
     let cache_file = cache_dir.join(&shot);
-
-    // 1. Check local cache
     if cache_file.exists() {
         if let Ok(bytes) = fs::read(&cache_file).await {
             return (
@@ -34,7 +46,7 @@ pub async fn screenshot_proxy_handler(
         }
     }
 
-    // 2. Fetch from upstream GitHub repository
+    // 3. Fetch from upstream GitHub repository
     let remote_url = format!("{}/{}/{}", SCREENSHOTS_BASE, app, shot);
     let client = reqwest::Client::builder()
         .user_agent("ArtCraft-Server-Mirror/0.1.0")
@@ -60,31 +72,39 @@ pub async fn screenshot_proxy_handler(
         Err(_) => return (StatusCode::BAD_GATEWAY, "Stream error").into_response(),
     };
 
-    // 3. Verify JPEG magic bytes 0xFF 0xD8 0xFF per AGENTS.md
+    // 4. Verify JPEG magic bytes 0xFF 0xD8 0xFF per AGENTS.md
     if bytes.len() < 3 || bytes[0] != 0xFF || bytes[1] != 0xD8 || bytes[2] != 0xFF {
         return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "Not a valid JPEG image").into_response();
     }
 
-    // 4. Save to local cache in background and sync to S3
+    // 5. Save to MinIO S3, Postgres database, and local cache
     let bytes_vec = bytes.to_vec();
     let cache_file_clone = cache_file.clone();
     let s3_opt = state.s3.clone();
+    let db_opt = state.db.clone();
     let app_clone = app.clone();
     let shot_clone = shot.clone();
+    let s3_key_clone = s3_key.clone();
+
     tokio::spawn(async move {
+        // Local cache
         if let Err(e) = fs::create_dir_all(&cache_dir).await {
             warn!("Could not create screenshot dir: {}", e);
-            return;
         }
-        if let Err(e) = fs::write(&cache_file_clone, &bytes_vec).await {
-            warn!("Could not cache screenshot {}: {}", cache_file_clone.display(), e);
-        } else {
-            info!("Cached screenshot: {}", cache_file_clone.display());
+        let _ = fs::write(&cache_file_clone, &bytes_vec).await;
+
+        // MinIO S3
+        if let Some(s3) = s3_opt {
+            if let Err(e) = s3.put_object(&s3_key_clone, &bytes_vec, "image/jpeg").await {
+                warn!("Failed to save screenshot to S3: {}", e);
+            } else {
+                info!("Saved screenshot to MinIO S3: {}", s3_key_clone);
+            }
         }
 
-        if let Some(s3) = s3_opt {
-            let s3_key = format!("screenshots/{}/{}", app_clone, shot_clone);
-            let _ = s3.put_object(&s3_key, &bytes_vec, "image/jpeg").await;
+        // PostgreSQL
+        if let Some(db) = db_opt {
+            db.upsert_screenshot(&app_clone, &shot_clone, &s3_key_clone, bytes_vec.len() as i64).await;
         }
     });
 

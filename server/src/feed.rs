@@ -54,13 +54,13 @@ pub async fn get_release_info(state: AppState) -> Value {
         let mut new_known_assets = HashMap::new();
 
         // Parse apps and rewrite download URLs to point to our local server
-        let apps_container = if root.get("apps").is_some() {
+        let mut apps_container = if root.get("apps").is_some() {
             root.get_mut("apps")
         } else {
             root.get_mut("release_info").and_then(|r| r.get_mut("apps"))
         };
 
-        if let Some(apps) = apps_container.and_then(|a| a.as_object_mut()) {
+        if let Some(apps) = apps_container.as_mut().and_then(|a| a.as_object_mut()) {
             for (_app_name, app_val) in apps.iter_mut() {
                 let release = if app_val.get("release").is_some() {
                     app_val.get_mut("release")
@@ -129,13 +129,133 @@ pub async fn get_release_info(state: AppState) -> Value {
         // Update global asset cache
         if !new_known_assets.is_empty() {
             let mut cache = KNOWN_UPSTREAM_ASSETS.write().await;
-            *cache = new_known_assets;
+            for (k, v) in new_known_assets {
+                cache.insert(k, v);
+            }
         }
 
+        // Inject Custom Apps from database
+        let custom_apps = if let Some(db) = &state.db {
+            db.list_custom_apps().await
+        } else {
+            Vec::new()
+        };
+
+        let mut custom_catalog_entries = Vec::new();
+
+        if let Some(apps) = apps_container.as_mut().and_then(|a| a.as_object_mut()) {
+            for ca in &custom_apps {
+                let app_assets: Vec<Value> = ca.assets.iter().map(|a| {
+                    let local_server_url = format!("{}/downloads/{}", base_url, a.filename);
+                    json!({
+                        "name": a.filename,
+                        "browser_download_url": local_server_url,
+                        "download_url": local_server_url,
+                        "sha256": a.sha256,
+                        "size": a.size_bytes,
+                        "size_bytes": a.size_bytes,
+                        "is_local_mirror": true,
+                        "status": "cached_locally",
+                        "platform": {
+                            "os": a.platform_os,
+                            "arch": a.platform_arch,
+                            "package_type": a.package_type
+                        }
+                    })
+                }).collect();
+
+                let app_entry = json!({
+                    "name": ca.name,
+                    "repo": ca.repo,
+                    "app_last_fetched": chrono::Utc::now().to_rfc3339(),
+                    "latest_release": {
+                        "name": format!("{} v{}", ca.name, ca.version),
+                        "tag": format!("v{}", ca.version),
+                        "version": ca.version,
+                        "notes_markdown": ca.notes,
+                        "published_at": ca.updated_at,
+                        "html_url": format!("{}/apps/{}", base_url, ca.id),
+                        "assets": app_assets
+                    }
+                });
+
+                apps.insert(ca.id.clone(), app_entry);
+
+                custom_catalog_entries.push(json!({
+                    "id": ca.id,
+                    "name": ca.name,
+                    "tagline": ca.tagline,
+                    "repo": ca.repo,
+                    "color": ca.color,
+                    "version": ca.version,
+                    "mac_team": ca.mac_team
+                }));
+            }
+        }
+
+        root["custom_catalog"] = json!(custom_catalog_entries);
         root
     } else {
         // Fallback: local standalone feed
-        generate_local_feed(&local_map, &base_url)
+        let mut feed = generate_local_feed(&local_map, &base_url);
+        let custom_apps = if let Some(db) = &state.db {
+            db.list_custom_apps().await
+        } else {
+            Vec::new()
+        };
+
+        let mut custom_catalog_entries = Vec::new();
+        if let Some(apps) = feed.get_mut("apps").and_then(|a| a.as_object_mut()) {
+            for ca in &custom_apps {
+                let app_assets: Vec<Value> = ca.assets.iter().map(|a| {
+                    let local_server_url = format!("{}/downloads/{}", base_url, a.filename);
+                    json!({
+                        "name": a.filename,
+                        "browser_download_url": local_server_url,
+                        "download_url": local_server_url,
+                        "sha256": a.sha256,
+                        "size": a.size_bytes,
+                        "size_bytes": a.size_bytes,
+                        "is_local_mirror": true,
+                        "status": "cached_locally",
+                        "platform": {
+                            "os": a.platform_os,
+                            "arch": a.platform_arch,
+                            "package_type": a.package_type
+                        }
+                    })
+                }).collect();
+
+                let app_entry = json!({
+                    "name": ca.name,
+                    "repo": ca.repo,
+                    "app_last_fetched": chrono::Utc::now().to_rfc3339(),
+                    "latest_release": {
+                        "name": format!("{} v{}", ca.name, ca.version),
+                        "tag": format!("v{}", ca.version),
+                        "version": ca.version,
+                        "notes_markdown": ca.notes,
+                        "published_at": ca.updated_at,
+                        "html_url": format!("{}/apps/{}", base_url, ca.id),
+                        "assets": app_assets
+                    }
+                });
+
+                apps.insert(ca.id.clone(), app_entry);
+
+                custom_catalog_entries.push(json!({
+                    "id": ca.id,
+                    "name": ca.name,
+                    "tagline": ca.tagline,
+                    "repo": ca.repo,
+                    "color": ca.color,
+                    "version": ca.version,
+                    "mac_team": ca.mac_team
+                }));
+            }
+        }
+        feed["custom_catalog"] = json!(custom_catalog_entries);
+        feed
     }
 }
 

@@ -1,5 +1,24 @@
 services:
-  # 1. MinIO Community Edition (S3 Compatible Object Storage)
+  # 1. PostgreSQL 16 Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: artcraft-postgres
+    ports:
+      - "5432:5432" # PostgreSQL Port
+    environment:
+      POSTGRES_DB: artcraft
+      POSTGRES_USER: artcraft
+      POSTGRES_PASSWORD: artcraft_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U artcraft -d artcraft"]
+      interval: 4s
+      timeout: 2s
+      retries: 5
+    restart: unless-stopped
+
+  # 2. MinIO Community Edition (S3 Compatible Object Storage)
   minio:
     image: artcraft-minio:latest
     container_name: artcraft-minio
@@ -20,7 +39,7 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # 2. Automated S3 Bucket Initializer (Bucket + Public Download Policy)
+  # 3. Automated S3 Bucket Initializer (Bucket + Public Download Policy)
   minio-init:
     image: artcraft-minio:latest
     container_name: artcraft-minio-init
@@ -42,7 +61,7 @@ services:
         exit 0;
       "
 
-  # 3. Rust Axum Backend (Distribution & Mirror Engine with S3 + WebSocket)
+  # 4. Rust Axum Backend (Distribution & Mirror Engine with PostgreSQL + S3 + WebSocket)
   server:
     build:
       context: ./server
@@ -54,6 +73,7 @@ services:
       PORT: "8080"
       ADMIN_PASSWORD: "admin123"
       STORAGE_DIR: "/app/storage"
+      DATABASE_URL: "postgres://artcraft:artcraft_pass@postgres:5432/artcraft"
       S3_ENDPOINT: "http://minio:9000"
       S3_BUCKET: "artcraft-packages"
       S3_ACCESS_KEY: "minioadmin"
@@ -62,6 +82,8 @@ services:
       S3_PUBLIC_URL: "http://localhost:9000/artcraft-packages"
       STORAGE_MODE: "s3"
     depends_on:
+      postgres:
+        condition: service_healthy
       minio:
         condition: service_healthy
       minio-init:
@@ -70,7 +92,7 @@ services:
       - server_storage:/app/storage
     restart: unless-stopped
 
-  # 4. Next.js 16 Web Admin Dashboard (WebSocket Live updates + S3 Explorer)
+  # 5. Next.js 16 Web Admin Dashboard (WebSocket Live updates + PostgreSQL & S3 Explorer)
   admin:
     build:
       context: ./admin
@@ -89,5 +111,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  postgres_data:
   minio_data:
   server_storage:
