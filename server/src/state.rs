@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,6 +39,7 @@ pub struct AppState {
     pub tasks_order: Arc<RwLock<Vec<String>>>,
     pub base_url: Arc<RwLock<String>>,
     pub s3: Option<Arc<crate::s3::S3Storage>>,
+    pub ws_tx: broadcast::Sender<String>,
 }
 
 impl AppState {
@@ -48,6 +49,7 @@ impl AppState {
         default_port: u16,
         s3: Option<Arc<crate::s3::S3Storage>>,
     ) -> Self {
+        let (ws_tx, _) = broadcast::channel(512);
         Self {
             storage_dir,
             admin_password: Arc::new(admin_password),
@@ -55,6 +57,14 @@ impl AppState {
             tasks_order: Arc::new(RwLock::new(Vec::new())),
             base_url: Arc::new(RwLock::new(format!("http://localhost:{}", default_port))),
             s3,
+            ws_tx,
+        }
+    }
+
+    /// Broadcast an event to all connected WebSocket clients
+    pub fn broadcast_event<T: Serialize>(&self, event: &T) {
+        if let Ok(msg) = serde_json::to_string(event) {
+            let _ = self.ws_tx.send(msg);
         }
     }
 }

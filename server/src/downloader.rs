@@ -187,6 +187,12 @@ pub fn start_download_task(
             task_id, downloaded_bytes, dest_rel.display(), sha256_hash
         );
 
+        state.broadcast_event(&crate::ws::WsServerMessage::FileAdded {
+            filename: safe_name.clone(),
+            folder: dest_rel.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+            sha256: sha256_hash.clone(),
+        });
+
         update_task_status(
             &state,
             &task_id,
@@ -203,5 +209,8 @@ async fn update_task_status(state: &AppState, task_id: &str, status: TaskStatus)
     let mut tasks = state.tasks.write().await;
     if let Some(task) = tasks.get_mut(task_id) {
         task.status = status;
+        let task_clone = task.clone();
+        drop(tasks);
+        state.broadcast_event(&crate::ws::WsServerMessage::TaskUpdated(task_clone));
     }
 }

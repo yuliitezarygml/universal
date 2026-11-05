@@ -7,6 +7,7 @@ mod screenshots;
 mod state;
 mod storage;
 mod sync;
+mod ws;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
