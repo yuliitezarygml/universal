@@ -112,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/apps/sync", post(trigger_apps_sync_handler))
         .route("/api/s3/status", get(s3_status_handler))
         .route("/api/s3/files", get(s3_files_handler))
+        .route("/ws", get(ws::ws_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
@@ -237,10 +238,11 @@ async fn smart_download_handler(
 
             {
                 let mut tasks = state.tasks.write().await;
-                tasks.insert(task_id.clone(), task);
+                tasks.insert(task_id.clone(), task.clone());
                 let mut order = state.tasks_order.write().await;
                 order.insert(0, task_id.clone());
             }
+            state.broadcast_event(&crate::ws::WsServerMessage::TaskUpdated(task));
 
             let expected_sha256 = if asset.sha256.len() == 64 {
                 Some(asset.sha256)
@@ -298,7 +300,12 @@ async fn delete_file_handler(
     }
 
     match storage::delete_storage_file(&state.storage_dir, &filename).await {
-        Ok(_) => (StatusCode::OK, Json(json!({ "deleted": filename }))).into_response(),
+        Ok(_) => {
+            state.broadcast_event(&crate::ws::WsServerMessage::FileDeleted {
+                filename: filename.clone(),
+            });
+            (StatusCode::OK, Json(json!({ "deleted": filename }))).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -427,11 +434,17 @@ async fn upload_handler(
         }
 
         info!("File uploaded: {} -> {} (SHA-256: {})", safe_name, rel_path.display(), sha256_hash);
+        let folder_name = rel_path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        state.broadcast_event(&crate::ws::WsServerMessage::FileAdded {
+            filename: safe_name.clone(),
+            folder: folder_name.clone(),
+            sha256: sha256_hash.clone(),
+        });
         return (
             StatusCode::OK,
             Json(json!({
                 "filename": safe_name,
-                "folder": rel_path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+                "folder": folder_name,
                 "sha256": sha256_hash
             })),
         )
@@ -484,11 +497,12 @@ async fn remote_download_handler(
 
     {
         let mut tasks = state.tasks.write().await;
-        tasks.insert(task_id.clone(), task);
+        tasks.insert(task_id.clone(), task.clone());
         let mut order = state.tasks_order.write().await;
         order.insert(0, task_id.clone());
     }
 
+    state.broadcast_event(&crate::ws::WsServerMessage::TaskUpdated(task));
     downloader::start_download_task(state, task_id.clone(), url, filename, None);
 
     (StatusCode::OK, Json(json!({ "task_id": task_id }))).into_response()

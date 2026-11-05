@@ -1,13 +1,13 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::state::{AppState, DownloadTask};
-use crate::{downloader, feed, sync};
+use crate::{downloader, sync};
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -58,7 +58,7 @@ pub enum WsServerMessage {
         filename: String,
     },
     SyncQueued {
-        queued_tasks: Vec<String>,
+        queued_count: usize,
     },
     Pong,
     Error {
@@ -156,7 +156,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut is_authenticated:
                                 WsClientCommand::SyncApp { app_id, platform } => {
                                     match sync::queue_app_assets_sync(&app_state, &app_id, platform.as_deref()).await {
                                         Ok(queued) => {
-                                            app_state.broadcast_event(&WsServerMessage::SyncQueued { queued_tasks: queued });
+                                            app_state.broadcast_event(&WsServerMessage::SyncQueued { queued_count: queued });
                                         }
                                         Err(e) => {
                                             app_state.broadcast_event(&WsServerMessage::Error { message: e });
@@ -165,7 +165,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, mut is_authenticated:
                                 }
                                 WsClientCommand::SyncAll => {
                                     let queued = sync::queue_all_apps_sync(&app_state).await;
-                                    app_state.broadcast_event(&WsServerMessage::SyncQueued { queued_tasks: queued });
+                                    app_state.broadcast_event(&WsServerMessage::SyncQueued { queued_count: queued });
                                 }
                                 WsClientCommand::RemoteDownload { url, filename } => {
                                     let clean_url = url.trim().to_string();

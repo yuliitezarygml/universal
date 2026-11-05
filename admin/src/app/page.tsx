@@ -82,8 +82,18 @@ export default function AdminPage() {
   const [loginError, setLoginError] = useState(false);
 
   const [activeTab, setActiveTab] = useState<"suite" | "storage" | "remote" | "minio">("suite");
-  const [backendUrl, setBackendUrl] = useState("http://localhost:8080");
-  const [minioConsoleUrl, setMinioConsoleUrl] = useState("http://localhost:9001");
+  const [backendUrl, setBackendUrl] = useState(() => {
+    if (typeof window !== "undefined") {
+      return process.env.NEXT_PUBLIC_API_URL || `${window.location.protocol}//${window.location.hostname}:8080`;
+    }
+    return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+  });
+  const [minioConsoleUrl, setMinioConsoleUrl] = useState(() => {
+    if (typeof window !== "undefined") {
+      return process.env.NEXT_PUBLIC_MINIO_CONSOLE_URL || `${window.location.protocol}//${window.location.hostname}:9001`;
+    }
+    return process.env.NEXT_PUBLIC_MINIO_CONSOLE_URL || "http://localhost:9001";
+  });
 
   const [s3Status, setS3Status] = useState<S3Status | null>(null);
   const [apps, setApps] = useState<AppSyncStatus[]>([]);
@@ -96,6 +106,8 @@ export default function AdminPage() {
   const [uploadProgress, setUploadProgress] = useState<{ filename: string; percent: number } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const [wsStatus, setWsStatus] = useState<"connected" | "connecting" | "disconnected">("disconnected");
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -171,16 +183,135 @@ export default function AdminPage() {
     }
   };
 
+  // WebSocket connection effect
+  useEffect(() => {
+    if (!authToken) {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      setWsStatus("disconnected");
+      return;
+    }
+
+    let ws: WebSocket | null = null;
+    let reconnectTimer: NodeJS.Timeout | null = null;
+    let pingInterval: NodeJS.Timeout | null = null;
+    let isCancelled = false;
+
+    const connectWs = () => {
+      if (isCancelled) return;
+      setWsStatus("connecting");
+
+      try {
+        const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const host = backendUrl.replace(/^https?:\/\//, "");
+        const wsUrl = `${wsProtocol}//${host}/ws?token=${encodeURIComponent(authToken)}`;
+
+        ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (isCancelled) return;
+          setWsStatus("connected");
+          // Heartbeat ping every 25s
+          pingInterval = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ action: "ping" }));
+            }
+          }, 25000);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "init") {
+              if (msg.data.tasks) setTasks(msg.data.tasks);
+              if (msg.data.s3_enabled !== undefined) {
+                setS3Status({
+                  enabled: msg.data.s3_enabled,
+                  bucket: msg.data.s3_bucket,
+                });
+              }
+            } else if (msg.type === "task_updated") {
+              const updatedTask: DownloadTask = msg.data;
+              setTasks((prev) => {
+                const idx = prev.findIndex((t) => t.id === updatedTask.id);
+                if (idx >= 0) {
+                  const next = [...prev];
+                  next[idx] = updatedTask;
+                  return next;
+                } else {
+                  return [updatedTask, ...prev];
+                }
+              });
+              if (updatedTask.status.type === "Finished") {
+                fetchData();
+              }
+            } else if (msg.type === "file_added") {
+              showToast(`Новый файл в S3: ${msg.data.filename}`);
+              fetchData();
+            } else if (msg.type === "file_deleted") {
+              setFiles((prev) => prev.filter((f) => f.name !== msg.data.filename));
+              showToast(`Файл удален: ${msg.data.filename}`);
+              fetchData();
+            } else if (msg.type === "sync_queued") {
+              showToast(`Поставлено в очередь загрузок: ${msg.data.queued_count} файлов`);
+              fetchData();
+            }
+          } catch (e) {
+            console.error("WS parse error", e);
+          }
+        };
+
+        ws.onclose = () => {
+          if (isCancelled) return;
+          setWsStatus("disconnected");
+          if (pingInterval) clearInterval(pingInterval);
+          reconnectTimer = setTimeout(connectWs, 3000);
+        };
+
+        ws.onerror = () => {
+          if (ws) ws.close();
+        };
+      } catch (err) {
+        setWsStatus("disconnected");
+        reconnectTimer = setTimeout(connectWs, 3000);
+      }
+    };
+
+    connectWs();
+
+    return () => {
+      isCancelled = true;
+      if (pingInterval) clearInterval(pingInterval);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+    };
+  }, [authToken, backendUrl]);
+
+  // Periodic slow refresh as fallback (every 10s)
   useEffect(() => {
     if (authToken) {
       fetchData();
-      const interval = setInterval(fetchData, 2500);
+      const interval = setInterval(fetchData, 10000);
       return () => clearInterval(interval);
     }
   }, [authToken]);
 
+  const sendWs = (payload: any): boolean => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(payload));
+      return true;
+    }
+    return false;
+  };
+
   const syncApp = async (appId: string, platform: string | null = null) => {
     showToast(`Запуск синхронизации для ${appId}...`);
+    if (sendWs({ action: "sync_app", app_id: appId, platform })) {
+      return;
+    }
     try {
       const res = await fetch(`${backendUrl}/api/apps/sync`, {
         method: "POST",
@@ -202,6 +333,10 @@ export default function AdminPage() {
   const syncAllApps = async () => {
     if (!confirm("Скачать последние релизы ВСЕХ 17 приложений в MinIO S3?")) return;
     showToast("Запуск глобальной синхронизации в MinIO...");
+    if (sendWs({ action: "sync_all" })) {
+      setActiveTab("remote");
+      return;
+    }
     try {
       const res = await fetch(`${backendUrl}/api/apps/sync`, {
         method: "POST",
@@ -221,6 +356,9 @@ export default function AdminPage() {
 
   const deleteFile = async (name: string) => {
     if (!confirm(`Удалить файл "${name}" из S3 хранилища?`)) return;
+    if (sendWs({ action: "delete_file", filename: name })) {
+      return;
+    }
     try {
       const res = await fetch(`${backendUrl}/api/files/${encodeURIComponent(name)}`, {
         method: "DELETE",
@@ -240,6 +378,12 @@ export default function AdminPage() {
   const startRemoteDownload = async () => {
     if (!remoteUrl.trim()) {
       alert("Введите URL файла");
+      return;
+    }
+    showToast("Запуск скачивания по URL...");
+    if (sendWs({ action: "remote_download", url: remoteUrl.trim() })) {
+      setRemoteUrl("");
+      setActiveTab("remote");
       return;
     }
     try {
@@ -387,6 +531,39 @@ export default function AdminPage() {
         </div>
 
         <div className="flex items-center gap-3">
+          {/* WebSocket Live Status */}
+          <div
+            className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium border transition ${
+              wsStatus === "connected"
+                ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                : wsStatus === "connecting"
+                ? "bg-amber-500/10 text-amber-400 border-amber-500/30"
+                : "bg-rose-500/10 text-rose-400 border-rose-500/30"
+            }`}
+          >
+            {wsStatus === "connected" && (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                <span>WebSocket Live</span>
+              </>
+            )}
+            {wsStatus === "connecting" && (
+              <>
+                <RefreshCw className="w-3 h-3 animate-spin text-amber-400" />
+                <span>WS Подключение...</span>
+              </>
+            )}
+            {wsStatus === "disconnected" && (
+              <>
+                <span className="w-2 h-2 rounded-full bg-rose-500"></span>
+                <span>WS Офлайн</span>
+              </>
+            )}
+          </div>
+
           {/* S3 Status Pill */}
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium bg-[#10b981]/10 text-[#10b981] border border-[#10b981]/25">
             <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>

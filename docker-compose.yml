@@ -14,40 +14,42 @@ services:
     volumes:
       - minio_data:/bitnami/minio/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "/usr/bin/curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 4s
       timeout: 2s
       retries: 5
     restart: unless-stopped
 
-  # 2. Automated S3 Bucket Initializer
+  # 2. Automated S3 Bucket Initializer (Bucket + Public Download Policy)
   minio-init:
     image: artcraft-minio:latest
     container_name: artcraft-minio-init
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        export HOME=/tmp
+    environment:
+      HOME: /tmp
+    entrypoint: >
+      /bin/sh -c "
+        export HOME=/tmp;
         until /opt/bitnami/minio-client/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin123; do
-          echo 'Waiting for MinIO connection...'
-          sleep 1
-        done
-        /opt/bitnami/minio-client/bin/mc mb --ignore-existing myminio/artcraft-packages
-        /opt/bitnami/minio-client/bin/mc anonymous set download myminio/artcraft-packages
-        echo 'Bucket artcraft-packages created with anonymous download policy!'
-        exit 0
+          echo 'Waiting for MinIO connection...';
+          sleep 1;
+        done;
+        /opt/bitnami/minio-client/bin/mc mb --ignore-existing myminio/artcraft-packages;
+        /opt/bitnami/minio-client/bin/mc anonymous set download myminio/artcraft-packages;
+        echo 'Bucket artcraft-packages created with anonymous download policy!';
+        exit 0;
+      "
 
-  # 3. Rust Axum Backend (Distribution & Mirror Engine with S3)
+  # 3. Rust Axum Backend (Distribution & Mirror Engine with S3 + WebSocket)
   server:
     build:
       context: ./server
       dockerfile: Dockerfile
     container_name: artcraft-server
     ports:
-      - "8080:8080" # Backend API & Feed
+      - "8080:8080" # Backend API, Feed & WebSocket (/ws)
     environment:
       PORT: "8080"
       ADMIN_PASSWORD: "admin123"
@@ -68,7 +70,7 @@ services:
       - server_storage:/app/storage
     restart: unless-stopped
 
-  # 4. Next.js Admin Panel
+  # 4. Next.js 16 Web Admin Dashboard (WebSocket Live updates + S3 Explorer)
   admin:
     build:
       context: ./admin
