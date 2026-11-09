@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, sans-serif;
+  color: #251d32;
+  background: #f7f5fa;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { width: min(1120px, calc(100% - 32px)); margin: 44px auto; }
+header { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+h1, h2 { line-height: 1.2; margin: 0; }
+h1 { font-size: clamp(26px, 5vw, 40px); }
+h2 { font-size: 20px; }
+section { margin-top: 28px; }
+.brand { color: #63409a; font-size: 13px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+.muted, small { color: #5f566a; }
+small { display: block; margin-top: 4px; }
+.login { width: min(440px, calc(100% - 32px)); padding: 28px; background: #fff; border: 1px solid #e7e1ed; border-radius: 20px; }
+.login form { display: grid; gap: 14px; margin-top: 24px; }
+label { display: grid; gap: 5px; font-size: 13px; }
+input, button { font: inherit; min-height: 40px; border-radius: 8px; }
+input { width: 100%; border: 1px solid #d8d0e4; color: inherit; background: #fff; padding: 8px 10px; }
+button { background: #643da2; color: #fff; border: 1px solid transparent; padding: 8px 14px; cursor: pointer; }
+button.secondary { background: #fff; border-color: #d8d0e4; color: #302348; }
+.notice { padding: 10px 14px; background: #eee7fb; border-radius: 8px; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.metrics div { background: #fff; padding: 14px; border: 1px solid #e7e1ed; border-radius: 12px; }
+dt { color: #5f566a; font-size: 13px; }
+dd { font-size: 26px; margin: 4px 0 0; font-variant-numeric: tabular-nums; }
+.table-scroll { overflow-x: auto; background: #fff; border: 1px solid #e7e1ed; border-radius: 12px; }
+table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
+th, td { padding: 12px; border-bottom: 1px solid #eee8f3; vertical-align: middle; }
+th { color: #5f566a; font-weight: 600; }
+tr:last-child td { border-bottom: 0; }
+.limits { display: flex; align-items: end; gap: 8px; }
+.limits input { width: 76px; }

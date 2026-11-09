@@ -1,0 +1,54 @@
+name: iskra-dev
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: iskra
+      POSTGRES_PASSWORD: ${ISKRA_DB_PASSWORD:-iskra_local_dev}
+      POSTGRES_DB: iskra
+    ports:
+      - '127.0.0.1:${ISKRA_POSTGRES_PORT:-55432}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+  server:
+    build: ./server
+    environment:
+      ISKRA_BIND_ADDRESS: 0.0.0.0:8080
+      ISKRA_DB_HOST: postgres
+      ISKRA_DB_PASSWORD: ${ISKRA_DB_PASSWORD:-iskra_local_dev}
+      ISKRA_PROVIDER_DAILY_LIMIT: ${ISKRA_PROVIDER_DAILY_LIMIT:-30}
+      ISKRA_OMNIROUTE_URL: ${ISKRA_OMNIROUTE_URL:-}
+      ISKRA_OMNIROUTE_KEY: ${ISKRA_OMNIROUTE_KEY:-}
+      ISKRA_OMNIROUTE_MODEL: ${ISKRA_OMNIROUTE_MODEL:-openrouter/recursive/flint-v1.0:free}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:${ISKRA_API_PORT:-8080}:8080'
+    healthcheck:
+      test: ['CMD', 'iskra-server', 'healthcheck']
+      interval: 5s
+      timeout: 4s
+      retries: 10
+  admin:
+    build: ./admin
+    environment:
+      ISKRA_SERVER_URL: http://server:8080
+      ISKRA_ADMIN_COOKIE_SECURE: ${ISKRA_ADMIN_COOKIE_SECURE:-false}
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:${ISKRA_ADMIN_PORT:-3000}:3000'
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'fetch("http://127.0.0.1:3000/").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))']
+      interval: 5s
+      timeout: 4s
+      retries: 10
+volumes:
+  postgres_data:
